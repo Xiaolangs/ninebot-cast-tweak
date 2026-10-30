@@ -25,3 +25,8 @@ ghome/
 .DS_Store
 Sweet-Module*
 ThemeRes-key-migration.diff
+
+# gh 登录配置（含令牌，禁止入库）
+.ghcfg/
+
+.signing/

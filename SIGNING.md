@@ -1,4 +1,6 @@
-# 签名方案（基于你提供的 ZODB6R 证书）
+# 本地重打包说明（签名由你自己完成）
+
+> CI 只负责产出 dylib；IPA 注入与重签在你本机做。下面是我从证书文件里读到的**关键事实**和**已知坑**。
 
 ## 1. 我从两个文件里读到的确定事实
 
@@ -36,33 +38,42 @@ iOS 安装时会校验 `application-identifier` 与 App 的 Bundle ID 一致，
 Ad-hoc 只能装到描述文件里那台设备：`00008130-00165D6436DA001C`。
 **如果这不是你要用的 iPhone，装不上的**——需要重新生成一份包含目标机 UDID 的描述文件。
 
-## 3. 需要你设置 3 个 Secret
+## 3. ⚠️ 已知坑：这个 p12 无法直接被 macOS 导入
 
-仓库 → Settings → Secrets and variables → Actions → New repository secret：
+`ZODB6R.p12` 用的是 **PBES2 / PBKDF2 / AES-256-CBC**（`openssl pkcs12 -info` 可验证）。
+macOS 的 Security 框架对此报 `SecKeychainItemImport: Unable to decode the provided data.`，
+`security import` 会失败、`find-identity` 显示 0 个身份。
 
-```bash
-# 生成待粘贴的值（在你本机执行，别提交文件）
-openssl base64 -A -in /Users/mac11/Downloads/证书_ZODB6R/ZODB6R.p12 | pbcopy      # → P12_BASE64
-openssl base64 -A -in /Users/mac11/Downloads/证书_ZODB6R/ZODB6R.mobileprovision | pbcopy  # → PROFILE_BASE64
-```
-- `P12_BASE64` = 上面第一个
-- `PROFILE_BASE64` = 上面第二个
-- `P12_PASSWORD` = `1`
-
-> ⚠️ 该 p12 密码是 `1`，且私钥已在你我之间传递过。**测试完建议吊销并重新签发**。
-> p12 / mobileprovision 已加入 `.gitignore`，绝不会进仓库。
-
-## 4. 把 IPA 放进私有 Release（不进 git）
-
-255 MB 的 IPA 不适合提交。用私有 Release 存一份，CI 用内置 `GITHUB_TOKEN` 下载：
+必须先转成 3DES/SHA1 的老格式再导入：
 
 ```bash
-gh release create ipa-assets /Users/mac11/Downloads/cn.ninebot.segway_6.10.9_und3fined.ipa \
-  --title "IPA assets" --notes "签名用原始 IPA"
-# 注意：资产名需为 Ninebot.ipa
+cd ~/Downloads/证书_ZODB6R
+openssl pkcs12 -in ZODB6R.p12 -passin pass:1 -nodes -out /tmp/zodb.pem
+
+# ⚠️ /tmp/zodb.pem 是**明文私钥**，导入成功后请立刻 rm
+openssl pkcs12 -export -in /tmp/zodb.pem -out /tmp/zodb_fixed.p12 -passout pass:1 \
+  -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg sha1
+
+security create-keychain -p test ~/sign.keychain
+security unlock-keychain -p test ~/sign.keychain
+security import /tmp/zodb_fixed.p12 -k ~/sign.keychain -P 1 -A -t cert -f pkcs12
+security find-identity -v -p codesigning ~/sign.keychain     # 应显示 1 valid identity
+rm -f /tmp/zodb.pem /tmp/zodb_fixed.p12
 ```
-或改名后再传：`cp .../cn.ninebot...ipa Ninebot.ipa && gh release upload ...`
-（也可在手动触发时直接填 `ipa_url` 直链，跳过 Release。）
+
+签名时用：`codesign -f -s "<identity>" --keychain ~/sign.keychain ...`
+
+## 4. 本地重打包流程（参考 `scripts/sign-ipa.sh`）
+
+1. 解包 IPA → `Payload/Ninebot.app`
+2. 放 dylib 到 `Frameworks/`，并用 `scripts/inject.py` 加 `LC_LOAD_DYLIB`
+   （`pip3 install 'lief==0.15.1'`；或改用 `insert_dylib`/`optool`）
+3. **改 `CFBundleIdentifier`** → `app.spinach4448.grapefruit6740`（见第 2 节，非通配 App ID 必须改）
+4. 从描述文件取 entitlements：`security cms -D -i ZODB6R.mobileprovision > p.plist`
+   `plutil -extract Entitlements xml1 -o ent.plist p.plist`
+5. 把 `embedded.mobileprovision` 放进 App 包
+6. 由深到浅签名：Frameworks 内所有 Mach-O → PlugIns/*.appex → `Ninebot` → 整个 App（带 entitlements）
+7. `zip -qryX out.ipa Payload`
 
 ## 5. 触发与产物
 
