@@ -1,6 +1,9 @@
-// ProjectionOverride — 九号出行(cn.ninebot.segway) 投屏导航「整帧替换」
-// Logos 版。拦截 -[NBPixelBufferConverter pixelBufferFromCGImage:]（编码器输入端）。
-// 免越狱可侧载：hook 由 substrate_shim.m 提供的 MSHookMessageEx 完成。
+// ProjectionOverride — 九号出行(cn.ninebot.segway) 投屏导航「整帧替换」正式版
+//
+// 拦截点：+[NBPixelBufferConverter pixelBufferFromCGImage:]（类方法，已实测）
+//         +[NBPixelBufferConverter pixelBufferFromCGImage_Mjpeg:]（MJPEG 备用路径）
+// 该类属于 NBVideoFactoryModule（投屏专用），因此无条件替换是安全的。
+// 日志前缀 [CAST]：投屏真正开始时会出现 frame #1 / #101 / ...
 
 #import <Foundation/Foundation.h>
 #import <CoreGraphics/CoreGraphics.h>
@@ -12,47 +15,41 @@
 #import <objc/runtime.h>
 #import <substrate.h>
 
-// ---- 目标类声明（二进制无头文件，按 Ghidra 分析结果手写）----
 @interface NBPixelBufferConverter : NSObject
++ (CVPixelBufferRef)pixelBufferFromCGImage:(CGImageRef)image;
++ (CVPixelBufferRef)pixelBufferFromCGImage_Mjpeg:(CGImageRef)image;
 - (CVPixelBufferRef)pixelBufferFromCGImage:(CGImageRef)image;
 - (CVPixelBufferRef)pixelBufferFromCGImage_Mjpeg:(CGImageRef)image;
 @end
 
-@interface NBVideoManager : NSObject
-- (void)recordVideo:(id)target stopAfter:(BOOL)stopAfter;
-- (void)stop;
-@end
-
-static os_log_t    gLog     = NULL;
-static NSLock     *gLock    = nil;
-static int         gPBCalls = 0;      // pixelBufferFromCGImage: 调用次数
-static int         gMjpegCalls = 0;   // Mjpeg 分支次数
-static int         gEncCalls = 0;     // 编码输出次数
+static os_log_t gLog   = NULL;
+static NSLock  *gLock  = nil;
+static int      gFrames = 0;
+static int      gDumped = 0;
 
 static BOOL OverrideEnabled(void) {
     id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NBProjectionOverride"];
-    return v ? [v boolValue] : YES;   // 置 NO 可恢复原生画面做对比
+    return v ? [v boolValue] : YES;          // 置 NO 即恢复原生画面
 }
 
-// ---- 你的画面（占位实现，换成自己的内容）----
+// ---------------- 你的画面 ----------------
 static CGImageRef RenderFrame(size_t w, size_t h) {
     if (w == 0 || h == 0) return NULL;
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
     CGContextRef ctx = CGBitmapContextCreate(NULL, w, h, 8, 0, cs,
-        kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);  // BGRA，与 App 一致
+        kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
     CGColorSpaceRelease(cs);
     if (!ctx) return NULL;
 
-    CGContextTranslateCTM(ctx, 0, (CGFloat)h);      // 翻成左上原点，便于按"屏幕坐标"画
+    CGContextTranslateCTM(ctx, 0, (CGFloat)h);
     CGContextScaleCTM(ctx, 1, -1);
 
     CGContextSetRGBFillColor(ctx, 0.05, 0.06, 0.09, 1.0);
     CGContextFillRect(ctx, CGRectMake(0, 0, w, h));
 
-    // 示例：一个直行箭头
+    CGFloat W = w, H = h;
     CGContextSetRGBFillColor(ctx, 0.13, 0.78, 0.55, 1.0);
     CGMutablePathRef p = CGPathCreateMutable();
-    CGFloat W = w, H = h;
     CGPathMoveToPoint(p, NULL, W*0.50, H*0.78);
     CGPathAddLineToPoint(p, NULL, W*0.24, H*0.48);
     CGPathAddLineToPoint(p, NULL, W*0.40, H*0.48);
@@ -65,7 +62,6 @@ static CGImageRef RenderFrame(size_t w, size_t h) {
     CGContextFillPath(ctx);
     CGPathRelease(p);
 
-    // 文字（CoreText）
     CTFontRef font = CTFontCreateWithName(CFSTR("Helvetica-Bold"), H * 0.11, NULL);
     CGColorRef white = CGColorCreateGenericRGB(1, 1, 1, 1);
     const void *keys[] = { kCTForegroundColorAttributeName };
@@ -84,7 +80,6 @@ static CGImageRef RenderFrame(size_t w, size_t h) {
     return img;
 }
 
-// 帧缓存：投屏以 25fps 调用本 hook，静态内容不重绘
 static CGImageRef FrameForSize(size_t w, size_t h) {
     [gLock lock];
     static CGImageRef cache = NULL;
@@ -101,364 +96,80 @@ static CGImageRef FrameForSize(size_t w, size_t h) {
     return out;
 }
 
-
-
-
-
-// ================= 重签适配：App Group / Suite Defaults 兜底 =================
-// 重签后 entitlement 里的 App Group 变成签名方的 group.dff7c45010bcbf41.x，
-// App 代码仍按 group.cn.ninebot.segway 取容器 → 返回 nil → 相关模块读写失败。
-static id GroupFallback(NSString *group) {
+// 可选：把真正要发给车机的画面导出（POFrameDump=YES 时前 5 帧）
+static void MaybeDump(CGImageRef img, int idx) {
+    if (gDumped >= 5) return;
+    id flag = [[NSUserDefaults standardUserDefaults] objectForKey:@"POFrameDump"];
+    if (!flag || ![flag boolValue]) return;
     NSArray *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-    if (!docs.count) return nil;
-    NSString *dir = [docs[0] stringByAppendingPathComponent:
-                     [NSString stringWithFormat:@"AppGroup_%@", group]];
+    if (!docs.count) return;
+    NSString *dir = [docs[0] stringByAppendingPathComponent:@"POFrames"];
     [[NSFileManager defaultManager] createDirectoryAtPath:dir
                              withIntermediateDirectories:YES attributes:nil error:nil];
-    return [NSURL fileURLWithPath:dir];
-}
-
-// ================= 直接打开指定页面（绕过坏掉的入口）=================
-static void PresentByClassName(const char *clsName) {
-    Class vcClass = objc_getClass(clsName);
-    if (!vcClass) { os_log(gLog, "[NAV] 类不存在: %{public}s", clsName); return; }
-    @try {
-        id app = ((id (*)(id, SEL))objc_msgSend)(objc_getClass("UIApplication"),
-                                                sel_registerName("sharedApplication"));
-        NSSet *scenes = ((id (*)(id, SEL))objc_msgSend)(app, sel_registerName("connectedScenes"));
-        Class sceneCls = objc_getClass("UIWindowScene");
-        id keyWindow = nil;
-        for (id sc in scenes) {
-            if (sceneCls && ![sc isKindOfClass:sceneCls]) continue;
-            for (id w in ((id (*)(id, SEL))objc_msgSend)(sc, sel_registerName("windows"))) {
-                if (((BOOL (*)(id, SEL))objc_msgSend)(w, sel_registerName("isKeyWindow"))) { keyWindow = w; break; }
-            }
-            if (keyWindow) break;
-        }
-        id root = keyWindow ? ((id (*)(id, SEL))objc_msgSend)(keyWindow, sel_registerName("rootViewController")) : nil;
-        if (!root) { os_log(gLog, "[NAV] 无 rootVC"); return; }
-
-        id vc = ((id (*)(id, SEL, id, id))objc_msgSend)(
-            ((id (*)(id, SEL))objc_msgSend)((id)vcClass, sel_registerName("alloc")),
-            sel_registerName("initWithNibName:bundle:"), nil, nil);
-        if (!vc) vc = ((id (*)(id, SEL))objc_msgSend)(
-            ((id (*)(id, SEL))objc_msgSend)((id)vcClass, sel_registerName("alloc")),
-            sel_registerName("init"));
-        if (!vc) { os_log(gLog, "[NAV] 实例化失败: %{public}s", clsName); return; }
-
-        id nav = ((id (*)(id, SEL, id))objc_msgSend)(
-            ((id (*)(id, SEL))objc_msgSend)(objc_getClass("UINavigationController"),
-                                            sel_registerName("alloc")),
-            sel_registerName("initWithRootViewController:"), vc);
-        ((void (*)(id, SEL, id, BOOL, id))objc_msgSend)(root,
-            sel_registerName("presentViewController:animated:completion:"), nav, YES, ^{
-                os_log(gLog, "[NAV] 已打开 %{public}s", clsName);
-            });
-    } @catch (NSException *e) {
-        os_log(gLog, "[NAV] 打开 %{public}s 失败: %{public}s", clsName, e.reason.UTF8String ?: "?");
-    }
-}
-
-
-// 把某个 UIView 子类单独包成页面显示（用于直接看投屏类型选择器）
-static void PresentViewByClassName(const char *clsName) {
-    Class vCls = objc_getClass(clsName);
-    if (!vCls) { os_log(gLog, "[NAV] 视图类不存在: %{public}s", clsName); return; }
-    @try {
-        id app = ((id (*)(id, SEL))objc_msgSend)(objc_getClass("UIApplication"),
-                                                sel_registerName("sharedApplication"));
-        NSSet *scenes = ((id (*)(id, SEL))objc_msgSend)(app, sel_registerName("connectedScenes"));
-        Class sceneCls = objc_getClass("UIWindowScene");
-        id keyWindow = nil;
-        for (id sc in scenes) {
-            if (sceneCls && ![sc isKindOfClass:sceneCls]) continue;
-            for (id w in ((id (*)(id, SEL))objc_msgSend)(sc, sel_registerName("windows"))) {
-                if (((BOOL (*)(id, SEL))objc_msgSend)(w, sel_registerName("isKeyWindow"))) { keyWindow = w; break; }
-            }
-            if (keyWindow) break;
-        }
-        id root = keyWindow ? ((id (*)(id, SEL))objc_msgSend)(keyWindow, sel_registerName("rootViewController")) : nil;
-        if (!root) { os_log(gLog, "[NAV] 无 rootVC"); return; }
-
-        struct CGRect_Shim { double x, y, w, h; };
-        struct CGRect_Shim b = ((struct CGRect_Shim (*)(id, SEL))objc_msgSend)(
-            keyWindow, sel_registerName("bounds"));
-        struct CGRect_Shim f = {0, 0, b.w, b.h * 0.6};
-        id view = ((id (*)(id, SEL, struct CGRect_Shim))objc_msgSend)(
-            ((id (*)(id, SEL))objc_msgSend)((id)vCls, sel_registerName("alloc")),
-            sel_registerName("initWithFrame:"), f);
-        if (!view) { os_log(gLog, "[NAV] 视图创建失败"); return; }
-
-        id vc = ((id (*)(id, SEL, id, id))objc_msgSend)(
-            ((id (*)(id, SEL))objc_msgSend)(objc_getClass("UIViewController"), sel_registerName("alloc")),
-            sel_registerName("initWithNibName:bundle:"), nil, nil);
-        ((void (*)(id, SEL, id))objc_msgSend)(vc, sel_registerName("setView:"), view);
-
-        id nav = ((id (*)(id, SEL, id))objc_msgSend)(
-            ((id (*)(id, SEL))objc_msgSend)(objc_getClass("UINavigationController"),
-                                            sel_registerName("alloc")),
-            sel_registerName("initWithRootViewController:"), vc);
-        ((void (*)(id, SEL, id, BOOL, id))objc_msgSend)(root,
-            sel_registerName("presentViewController:animated:completion:"), nav, YES, ^{
-                os_log(gLog, "[NAV] 已显示视图 %{public}s", clsName);
-            });
-    } @catch (NSException *e) {
-        os_log(gLog, "[NAV] 显示 %{public}s 失败: %{public}s", clsName, e.reason.UTF8String ?: "?");
-    }
-}
-
-// ================= 帧导出（确认 App 是否在产帧）=================
-static int gDumpIdx = 0;
-static void DumpImage(CGImageRef img, const char *tag) {
-    if (!img) return;
-    NSArray *dirs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-    if (!dirs.count) return;
-    NSString *dir = [dirs[0] stringByAppendingPathComponent:@"POFrames"];
-    [[NSFileManager defaultManager] createDirectoryAtPath:dir
-                              withIntermediateDirectories:YES attributes:nil error:nil];
     NSString *path = [dir stringByAppendingPathComponent:
-        [NSString stringWithFormat:@"%s_%03d.png", tag, gDumpIdx++]];
-    NSURL *url = [NSURL fileURLWithPath:path];
-    CGImageDestinationRef dst = CGImageDestinationCreateWithURL((__bridge CFURLRef)url,
-        CFSTR("public.png"), 1, NULL);
+                      [NSString stringWithFormat:@"cast_%03d.png", idx]];
+    CGImageDestinationRef dst = CGImageDestinationCreateWithURL(
+        (__bridge CFURLRef)[NSURL fileURLWithPath:path], CFSTR("public.png"), 1, NULL);
     if (!dst) return;
     CGImageDestinationAddImage(dst, img, NULL);
     CGImageDestinationFinalize(dst);
     CFRelease(dst);
-    os_log(gLog, "[DUMP] 已导出 %{public}s", path.UTF8String);
+    gDumped++;
+    os_log(gLog, "[CAST] 已导出 %{public}s", path.UTF8String);
 }
 
-// ================= 自动打开内置调试工具 =================
-static void OpenDebugTool(void) {
-    id flag = [[NSUserDefaults standardUserDefaults] objectForKey:@"POAutoOpenDebug"];
-    if (flag && ![flag boolValue]) { os_log(gLog, "[DBG] 已按要求跳过"); return; }
-
-    Class vcClass = objc_getClass("_TtC7Vehicle22VehicleDebugToolHomeVC");
-    if (!vcClass) { os_log(gLog, "[DBG] 调试工具类不存在"); return; }
-
-    @try {
-        id app = ((id (*)(id, SEL))objc_msgSend)(objc_getClass("UIApplication"),
-                                                 sel_registerName("sharedApplication"));
-        if (!app) { os_log(gLog, "[DBG] 无 UIApplication"); return; }
-
-        NSSet *scenes = ((id (*)(id, SEL))objc_msgSend)(app, sel_registerName("connectedScenes"));
-        Class sceneCls = objc_getClass("UIWindowScene");
-        id keyWindow = nil;
-        for (id sc in scenes) {
-            if (sceneCls && ![sc isKindOfClass:sceneCls]) continue;
-            NSArray *wins = ((id (*)(id, SEL))objc_msgSend)(sc, sel_registerName("windows"));
-            for (id w in wins) {
-                if (((BOOL (*)(id, SEL))objc_msgSend)(w, sel_registerName("isKeyWindow"))) {
-                    keyWindow = w; break;
-                }
-            }
-            if (keyWindow) break;
-        }
-        if (!keyWindow) { os_log(gLog, "[DBG] 没找到 keyWindow"); return; }
-
-        id root = ((id (*)(id, SEL))objc_msgSend)(keyWindow, sel_registerName("rootViewController"));
-        if (!root) { os_log(gLog, "[DBG] 没有 rootVC"); return; }
-
-        id vc = ((id (*)(id, SEL, id, id))objc_msgSend)(
-            ((id (*)(id, SEL))objc_msgSend)((id)vcClass, sel_registerName("alloc")),
-            sel_registerName("initWithNibName:bundle:"), nil, nil);
-        if (!vc) { os_log(gLog, "[DBG] 实例化失败"); return; }
-
-        id nav = ((id (*)(id, SEL, id))objc_msgSend)(
-            ((id (*)(id, SEL))objc_msgSend)(objc_getClass("UINavigationController"),
-                                            sel_registerName("alloc")),
-            sel_registerName("initWithRootViewController:"), vc);
-
-        ((void (*)(id, SEL, id, BOOL, id))objc_msgSend)(root,
-            sel_registerName("presentViewController:animated:completion:"), nav, YES, ^{
-                os_log(gLog, "[DBG] 调试工具已打开");
-            });
-    } @catch (NSException *e) {
-        os_log(gLog, "[DBG] 打开失败: %{public}s", e.reason.UTF8String ?: "?");
+static void NoteFrame(size_t w, size_t h) {
+    gFrames++;
+    if (gFrames == 1 || gFrames % 100 == 0) {
+        os_log(gLog, "[CAST] frame #%d size=%zux%zu（投屏正在推流，画面已替换）", gFrames, w, h);
     }
-}
-
-// ================= 运行时选择器导出 =================
-#import <objc/runtime.h>
-
-static void DumpSelectors(const char *clsName, int maxCount) {
-    Class c = objc_getClass(clsName);
-    if (!c) { os_log(gLog, "[DIAG] %{public}s 不存在", clsName); return; }
-    unsigned int n = 0;
-    Method *ms = class_copyMethodList(c, &n);
-    os_log(gLog, "[DIAG] %{public}s: %u 个方法%s", clsName, n, n > maxCount ? "（截断）" : "");
-    for (unsigned int i = 0; i < n && i < (unsigned int)maxCount; i++)
-        os_log(gLog, "[DIAG]    -%{public}s", sel_getName(method_getName(ms[i])));
-    free(ms);
-}
-
-// ================= 无车辆自检 =================
-// 原理：传入一张纯红哨兵图调用被 hook 的方法。
-//   hook 生效 → 红图被替换成我们的深色画面 → 采样点不是红色
-//   hook 未生效 → 原样转换 → 采样点是红色
-#import <objc/message.h>
-#import <mach-o/dyld.h>
-
-static CGImageRef MakeSentinel(int w, int h) {
-    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
-    CGContextRef ctx = CGBitmapContextCreate(NULL, w, h, 8, 0, cs,
-        kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
-    CGColorSpaceRelease(cs);
-    if (!ctx) return NULL;
-    CGContextSetRGBFillColor(ctx, 1.0, 0.0, 0.0, 1.0);   // 纯红
-    CGContextFillRect(ctx, CGRectMake(0, 0, w, h));
-    CGImageRef img = CGBitmapContextCreateImage(ctx);
-    CGContextRelease(ctx);
-    return img;
-}
-
-static void RunSelfTest(void) {
-    Class c = objc_getClass("NBPixelBufferConverter");
-    if (!c) { os_log(gLog, "[SELFTEST] ❌ 类不存在"); return; }
-
-    SEL sel = sel_registerName("pixelBufferFromCGImage:");
-    Method im = class_getInstanceMethod(c, sel);
-    Method cm = class_getClassMethod(c, sel);
-    os_log(gLog, "[SELFTEST] 类名=%{public}s 实例方法=%{public}s 类方法=%{public}s",
-           class_getName(c), im ? "是" : "否", cm ? "是" : "否");
-    if (!im && !cm) { os_log(gLog, "[SELFTEST] ❌ 两种形式都不存在"); return; }
-    // 不再提前 return：下面继续做计数验证
-
-    // 自绘能力自检（与 App 无关）
-    CGImageRef mine = RenderFrame(240, 320);
-    if (mine) {
-        os_log(gLog, "[SELFTEST] RenderFrame ✅ 成功 %zux%zu",
-               CGImageGetWidth(mine), CGImageGetHeight(mine));
-        CGImageRelease(mine);
-    } else {
-        os_log(gLog, "[SELFTEST] RenderFrame ❌ 失败");
-    }
-
-    // 核心判据：调用一次，看我们的 hook 有没有被触发（计数器 +1）
-    CGImageRef sentinel = MakeSentinel(240, 320);
-    if (!sentinel) { os_log(gLog, "[SELFTEST] 前置失败"); return; }
-
-    int before = gPBCalls;
-    // 关键：按【类方法】形式调用（已确认它是 + 方法）
-    CVPixelBufferRef pb = ((CVPixelBufferRef (*)(id, SEL, CGImageRef))objc_msgSend)((id)c, sel, sentinel);
-    int after = gPBCalls;
-    CGImageRelease(sentinel);
-
-    os_log(gLog, "[SELFTEST] hook 调用计数 %d -> %d", before, after);
-    os_log(gLog, "[SELFTEST] 结论: hook %{public}s",
-           (after > before) ? "✅ 已安装并被触发（替换链路 OK）"
-                            : "❌ 未安装（调用未经过我们的实现）");
-    os_log(gLog, "[SELFTEST] 原实现返回=%{public}s（裸实例返回 NULL 属正常，不作为判据）",
-           pb ? "非 NULL" : "NULL");
-    if (pb) CVPixelBufferRelease(pb);
 }
 
 // ---------------- Hooks ----------------
 %hook NBPixelBufferConverter
 
-// ---- 类方法（真正的调用形式）----
 + (CVPixelBufferRef)pixelBufferFromCGImage:(CGImageRef)image {
-    gPBCalls++;
-    if (gPBCalls == 1 || gPBCalls % 50 == 0)
-        os_log(gLog, "[DIAG] +pixelBufferFromCGImage #%d size=%zux%zu",
-               gPBCalls, CGImageGetWidth(image), CGImageGetHeight(image));
-    if (gDumpIdx < 3) DumpImage(image, "orig");       // 导出 App 原始帧，证明它在产帧
+    NoteFrame(CGImageGetWidth(image), CGImageGetHeight(image));
     if (!image || !OverrideEnabled()) return %orig;
     CGImageRef mine = FrameForSize(CGImageGetWidth(image), CGImageGetHeight(image));
-    if (!mine) { os_log(gLog, "[DIAG] RenderFrame 返回 NULL"); return %orig; }
+    if (!mine) return %orig;
+    MaybeDump(mine, gFrames);
     CVPixelBufferRef buf = %orig(mine);
     CGImageRelease(mine);
     return buf;
 }
 
 + (CVPixelBufferRef)pixelBufferFromCGImage_Mjpeg:(CGImageRef)image {
-    gMjpegCalls++;
-    if (gMjpegCalls == 1 || gMjpegCalls % 50 == 0)
-        os_log(gLog, "[DIAG] +Mjpeg #%d size=%zux%zu",
-               gMjpegCalls, CGImageGetWidth(image), CGImageGetHeight(image));
+    NoteFrame(CGImageGetWidth(image), CGImageGetHeight(image));
     if (!image || !OverrideEnabled()) return %orig;
     CGImageRef mine = FrameForSize(CGImageGetWidth(image), CGImageGetHeight(image));
     if (!mine) return %orig;
+    MaybeDump(mine, gFrames);
     CVPixelBufferRef buf = %orig(mine);
     CGImageRelease(mine);
     return buf;
 }
 
-// ---- 实例方法（备用，若某些调用点走实例形式）----
 - (CVPixelBufferRef)pixelBufferFromCGImage:(CGImageRef)image {
-    gPBCalls++;
-    if (gPBCalls == 1 || gPBCalls % 50 == 0)
-        os_log(gLog, "[DIAG] -pixelBufferFromCGImage #%d size=%zux%zu",
-               gPBCalls, CGImageGetWidth(image), CGImageGetHeight(image));
-    if (gDumpIdx < 3) DumpImage(image, "orig");       // 导出 App 原始帧，证明它在产帧
+    NoteFrame(CGImageGetWidth(image), CGImageGetHeight(image));
     if (!image || !OverrideEnabled()) return %orig;
     CGImageRef mine = FrameForSize(CGImageGetWidth(image), CGImageGetHeight(image));
-    if (!mine) { os_log(gLog, "[DIAG] RenderFrame 返回 NULL"); return %orig; }
+    if (!mine) return %orig;
+    MaybeDump(mine, gFrames);
     CVPixelBufferRef buf = %orig(mine);
     CGImageRelease(mine);
     return buf;
 }
 
 - (CVPixelBufferRef)pixelBufferFromCGImage_Mjpeg:(CGImageRef)image {
-    gMjpegCalls++;
-    if (gMjpegCalls == 1 || gMjpegCalls % 50 == 0)
-        os_log(gLog, "[DIAG] -Mjpeg #%d size=%zux%zu",
-               gMjpegCalls, CGImageGetWidth(image), CGImageGetHeight(image));
+    NoteFrame(CGImageGetWidth(image), CGImageGetHeight(image));
     if (!image || !OverrideEnabled()) return %orig;
     CGImageRef mine = FrameForSize(CGImageGetWidth(image), CGImageGetHeight(image));
     if (!mine) return %orig;
+    MaybeDump(mine, gFrames);
     CVPixelBufferRef buf = %orig(mine);
     CGImageRelease(mine);
     return buf;
-}
-
-%end
-
-%hook NSFileManager
-
-- (id)containerURLForSecurityApplicationGroupIdentifier:(NSString *)group {
-    id url = %orig;
-    static int probes = 0;
-    if (!url && group && probes++ < 6) {
-        BOOL fix = [[NSUserDefaults standardUserDefaults] boolForKey:@"POAppGroupFix"];
-        os_log(gLog, "[PROBE] AppGroup 容器为空: %{public}s（POAppGroupFix=%{public}s）",
-               group.UTF8String, fix ? "YES" : "NO");
-        // 默认只观察不改行为；显式开启后才兜底
-        if (fix) return GroupFallback(group);
-    }
-    return url;   // 行为与原生完全一致
-}
-
-%end
-
-
-
-%hook UIViewController
-- (void)presentViewController:(id)vc animated:(BOOL)animated completion:(id)completion {
-    os_log(gLog, "[NAV] present -> %{public}s", object_getClassName(vc));
-    %orig;
-}
-%end
-
-%hook UINavigationController
-- (void)pushViewController:(id)vc animated:(BOOL)animated {
-    os_log(gLog, "[NAV] push -> %{public}s", object_getClassName(vc));
-    %orig;
-}
-%end
-
-%hook NBVideoManager
-
-- (void)recordVideo:(id)target stopAfter:(BOOL)stopAfter {
-    if (gLog) os_log(gLog, "[DIAG] recordVideo:stopAfter: 被调用");
-    %orig;
-}
-
-- (void)imageVideoEncoder:(id)encoder didEncodedImage:(id)image {
-    gEncCalls++;
-    if (gEncCalls == 1 || gEncCalls % 50 == 0)
-        os_log(gLog, "[DIAG] 编码输出帧 #%d", gEncCalls);
-    %orig;
 }
 
 %end
@@ -466,67 +177,5 @@ static void RunSelfTest(void) {
 %ctor {
     gLog  = os_log_create("com.rev.projectionoverride", "general");
     gLock = [NSLock new];
-    os_log(gLog, "ProjectionOverride(Logos) loaded [DIAG v12 20261030i]");
-
-    // 关键诊断：枚举已加载镜像，数一数有几个 Projection 副本
-    {
-        int copies = 0, total = _dyld_image_count();
-        for (int i = 0; i < total; i++) {
-            const char *p = _dyld_get_image_name(i);
-            if (p && strstr(p, "Projection")) {
-                copies++;
-                os_log(gLog, "[DYLD] #%d %{public}s", copies, p);
-            }
-        }
-        os_log(gLog, "[DYLD] 共加载 %d 个 ProjectionOverride 副本（应为 1）", copies);
-    }
-
-    const char *names[] = {
-        "NBPixelBufferConverter", "NBVideoManager",
-        "_TtC7Vehicle25NBProjectionScreenManager",
-        "_TtC20NBVideoFactoryModule21NavigationViewBuilder",
-        "_TtC20NBVideoFactoryModule14VideoGenerator",
-        "_TtC20NBVideoFactoryModule21NavigationViewHandler",
-        "_TtC20NBVideoFactoryModule28VideoSocketsConnetionManager",
-        "_TtC20NBVideoFactoryModule13SnapshotTimer",
-        "_TtC20NBVideoFactoryModule16NavConfigManager",
-        "_TtC20NBVideoFactoryModule19NavigationInfoModel",
-        "_TtC7Vehicle13NaviSettingVC",
-        "_TtC7Vehicle27NaviScreenMirroringTypeView",
-        "_TtC7Vehicle13RNDebugModule",
-        "_TtC15NBDynamicModule19DynamicDebugManager",
-        "_TtC17NBRNPackageModule11BundleClass",
-        "_TtC10NBMapModul9NBMapView",
-        "_TtC10NBMapModul18NavigationSettings"
-    };
-    const int kNumClasses = 17;
-    for (int i = 0; i < kNumClasses; i++) {
-        Class c = objc_getClass(names[i]);
-        BOOL hasSel = NO;
-        if (c && i == 0)
-            hasSel = class_getInstanceMethod(c, @selector(pixelBufferFromCGImage:)) != NULL;
-        os_log(gLog, "[DIAG] class %{public}s -> %{public}s%s",
-               names[i], c ? "存在" : "不存在",
-               hasSel ? " (含 pixelBufferFromCGImage:)" : "");
-    }
-
-    // 运行时导出选择器，消除对 mangled/选择器名的猜测
-    for (int i = 0; i < kNumClasses; i++) DumpSelectors(names[i], 24);
-
-    // 启动 5 秒后自检（等 App 完成 launch，避免干扰）
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)),
-                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ RunSelfTest(); });
-
-    // 启动 12 秒后：默认直接打开「导航投屏设置」，可用 defaults 切换
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(12 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        NSString *want = [[NSUserDefaults standardUserDefaults] stringForKey:@"POAutoPresent"];
-        if (want == nil || [want isEqualToString:@"none"]) {
-            os_log(gLog, "[NAV] 不自动打开（如需见 POAutoPresent）"); return;
-        }
-        if ([want isEqualToString:@"debug"]) { OpenDebugTool(); return; }
-        if ([want isEqualToString:@"navisetting"]) { PresentByClassName("_TtC7Vehicle13NaviSettingVC"); return; }
-        // 默认：直接显示投屏类型选择视图
-        PresentViewByClassName("_TtC7Vehicle27NaviScreenMirroringTypeView");
-    });
+    os_log(gLog, "ProjectionOverride 1.0 已加载（投屏画面替换）");
 }
