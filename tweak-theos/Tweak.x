@@ -104,6 +104,20 @@ static CGImageRef FrameForSize(size_t w, size_t h) {
 
 
 
+
+// ================= 重签适配：App Group / Suite Defaults 兜底 =================
+// 重签后 entitlement 里的 App Group 变成签名方的 group.dff7c45010bcbf41.x，
+// App 代码仍按 group.cn.ninebot.segway 取容器 → 返回 nil → 相关模块读写失败。
+static id GroupFallback(NSString *group) {
+    NSArray *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    if (!docs.count) return nil;
+    NSString *dir = [docs[0] stringByAppendingPathComponent:
+                     [NSString stringWithFormat:@"AppGroup_%@", group]];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                             withIntermediateDirectories:YES attributes:nil error:nil];
+    return [NSURL fileURLWithPath:dir];
+}
+
 // ================= 直接打开指定页面（绕过坏掉的入口）=================
 static void PresentByClassName(const char *clsName) {
     Class vcClass = objc_getClass(clsName);
@@ -400,6 +414,37 @@ static void RunSelfTest(void) {
 
 %end
 
+%hook NSFileManager
+
+- (id)containerURLForSecurityApplicationGroupIdentifier:(NSString *)group {
+    id url = %orig;
+    static int once = 0;
+    if (!url && group) {
+        if (once++ < 8)
+            os_log(gLog, "[FIX] AppGroup 容器为空: %{public}s（重签所致）→ 使用沙盒目录兜底",
+                   group.UTF8String);
+        return GroupFallback(group);
+    }
+    if (url && once < 8) { once++; os_log(gLog, "[FIX] AppGroup 正常: %{public}s", group.UTF8String); }
+    return url;
+}
+
+%end
+
+%hook NSUserDefaults
+
+- (id)initWithSuiteName:(NSString *)suite {
+    id d = %orig;
+    if (!d && suite) {
+        os_log(gLog, "[FIX] suite defaults 失败: %{public}s → 回退 standard",
+               suite.UTF8String);
+        return ((id (*)(id, SEL))objc_msgSend)((id)self, sel_registerName("init"));
+    }
+    return d;
+}
+
+%end
+
 %hook UIViewController
 - (void)presentViewController:(id)vc animated:(BOOL)animated completion:(id)completion {
     os_log(gLog, "[NAV] present -> %{public}s", object_getClassName(vc));
@@ -433,7 +478,7 @@ static void RunSelfTest(void) {
 %ctor {
     gLog  = os_log_create("com.rev.projectionoverride", "general");
     gLock = [NSLock new];
-    os_log(gLog, "ProjectionOverride(Logos) loaded [DIAG v10 20261030g]");
+    os_log(gLog, "ProjectionOverride(Logos) loaded [DIAG v11 20261030h]");
 
     // 关键诊断：枚举已加载镜像，数一数有几个 Projection 副本
     {
@@ -488,7 +533,9 @@ static void RunSelfTest(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(12 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         NSString *want = [[NSUserDefaults standardUserDefaults] stringForKey:@"POAutoPresent"];
-        if ([want isEqualToString:@"none"]) { os_log(gLog, "[NAV] 按要求不自动打开"); return; }
+        if (want == nil || [want isEqualToString:@"none"]) {
+            os_log(gLog, "[NAV] 不自动打开（如需见 POAutoPresent）"); return;
+        }
         if ([want isEqualToString:@"debug"]) { OpenDebugTool(); return; }
         if ([want isEqualToString:@"navisetting"]) { PresentByClassName("_TtC7Vehicle13NaviSettingVC"); return; }
         // 默认：直接显示投屏类型选择视图
