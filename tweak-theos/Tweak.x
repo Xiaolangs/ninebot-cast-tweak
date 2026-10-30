@@ -98,6 +98,67 @@ static CGImageRef FrameForSize(size_t w, size_t h) {
     return out;
 }
 
+
+// ================= 无车辆自检 =================
+// 原理：传入一张纯红哨兵图调用被 hook 的方法。
+//   hook 生效 → 红图被替换成我们的深色画面 → 采样点不是红色
+//   hook 未生效 → 原样转换 → 采样点是红色
+#import <objc/message.h>
+
+static CGImageRef MakeSentinel(int w, int h) {
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate(NULL, w, h, 8, 0, cs,
+        kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
+    CGColorSpaceRelease(cs);
+    if (!ctx) return NULL;
+    CGContextSetRGBFillColor(ctx, 1.0, 0.0, 0.0, 1.0);   // 纯红
+    CGContextFillRect(ctx, CGRectMake(0, 0, w, h));
+    CGImageRef img = CGBitmapContextCreateImage(ctx);
+    CGContextRelease(ctx);
+    return img;
+}
+
+static void ReadCenterPixel(CVPixelBufferRef pb, int *r, int *g, int *b) {
+    *r = *g = *b = -1;
+    if (!pb) return;
+    CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+    size_t w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb);
+    size_t bpr = CVPixelBufferGetBytesPerRow(pb);
+    uint8_t *base = (uint8_t *)CVPixelBufferGetBaseAddress(pb);
+    if (base) {
+        uint8_t *px = base + (h / 2) * bpr + (w / 2) * 4;   // BGRA
+        *b = px[0]; *g = px[1]; *r = px[2];
+    }
+    CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+}
+
+static void RunSelfTest(void) {
+    Class c = objc_getClass("NBPixelBufferConverter");
+    if (!c) { os_log(gLog, "[SELFTEST] FAIL: 类不存在"); return; }
+
+    id conv = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)c, sel_registerName("alloc")),
+                                              sel_registerName("init"));
+    if (!conv) { os_log(gLog, "[SELFTEST] FAIL: 实例创建失败"); return; }
+
+    CGImageRef sentinel = MakeSentinel(240, 320);
+    if (!sentinel) { os_log(gLog, "[SELFTEST] FAIL: 哨兵图创建失败"); return; }
+
+    CVPixelBufferRef pb = ((CVPixelBufferRef (*)(id, SEL, CGImageRef))objc_msgSend)(
+        conv, sel_registerName("pixelBufferFromCGImage:"), sentinel);
+    CGImageRelease(sentinel);
+
+    if (!pb) { os_log(gLog, "[SELFTEST] FAIL: 返回空缓冲"); return; }
+
+    int r, g, b;
+    ReadCenterPixel(pb, &r, &g, &b);
+    os_log(gLog, "[SELFTEST] 中心像素 R=%d G=%d B=%d (纯红=255,0,0)", r, g, b);
+
+    // 我们的背景色是 (13,15,23)；红色哨兵若原样通过则是 (255,0,0)
+    BOOL hooked = (r >= 0) && (r < 120);      // 不是红色 → 被替换了
+    os_log(gLog, "[SELFTEST] 结论: hook %{public}s", hooked ? "✅ 生效（画面已被替换）" : "❌ 未生效（哨兵图原样返回）");
+    CVPixelBufferRelease(pb);
+}
+
 // ---------------- Hooks ----------------
 %hook NBPixelBufferConverter
 
@@ -170,4 +231,8 @@ static CGImageRef FrameForSize(size_t w, size_t h) {
                names[i], c ? "存在" : "不存在",
                hasSel ? " (含 pixelBufferFromCGImage:)" : "");
     }
+
+    // 启动 5 秒后自检（等 App 完成 launch，避免干扰）
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ RunSelfTest(); });
 }
