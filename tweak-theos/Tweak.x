@@ -118,6 +118,7 @@ static void DumpSelectors(const char *clsName, int maxCount) {
 //   hook 生效 → 红图被替换成我们的深色画面 → 采样点不是红色
 //   hook 未生效 → 原样转换 → 采样点是红色
 #import <objc/message.h>
+#import <mach-o/dyld.h>
 
 static CGImageRef MakeSentinel(int w, int h) {
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
@@ -138,8 +139,14 @@ static void RunSelfTest(void) {
 
     SEL sel = sel_registerName("pixelBufferFromCGImage:");
     Method m = class_getInstanceMethod(c, sel);
-    os_log(gLog, "[SELFTEST] 选择器存在=%{public}s", m ? "是" : "否");
-    if (!m) return;
+    os_log(gLog, "[SELFTEST] 类名=%{public}s 选择器存在=%{public}s",
+           class_getName(c), m ? "是" : "否");
+    if (!m) {
+        // 再探一层：是否为类方法 / 是否藏在父类
+        Method cm = class_getClassMethod(c, sel);
+        os_log(gLog, "[SELFTEST] 类方法=%{public}s", cm ? "是" : "否");
+        return;
+    }
 
     // 自绘能力自检（与 App 无关）
     CGImageRef mine = RenderFrame(240, 320);
@@ -226,7 +233,20 @@ static void RunSelfTest(void) {
 %ctor {
     gLog  = os_log_create("com.rev.projectionoverride", "general");
     gLock = [NSLock new];
-    os_log(gLog, "ProjectionOverride(Logos) loaded [DIAG v4]");
+    os_log(gLog, "ProjectionOverride(Logos) loaded [DIAG v5 20261030b]");
+
+    // 关键诊断：枚举已加载镜像，数一数有几个 Projection 副本
+    {
+        int copies = 0, total = _dyld_image_count();
+        for (int i = 0; i < total; i++) {
+            const char *p = _dyld_get_image_name(i);
+            if (p && strstr(p, "Projection")) {
+                copies++;
+                os_log(gLog, "[DYLD] #%d %{public}s", copies, p);
+            }
+        }
+        os_log(gLog, "[DYLD] 共加载 %d 个 ProjectionOverride 副本（应为 1）", copies);
+    }
 
     const char *names[] = {
         "NBPixelBufferConverter", "NBVideoManager",
