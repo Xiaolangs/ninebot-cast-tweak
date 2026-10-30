@@ -159,13 +159,12 @@ static void RunSelfTest(void) {
     }
 
     // 核心判据：调用一次，看我们的 hook 有没有被触发（计数器 +1）
-    id conv = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)c,
-        sel_registerName("alloc")), sel_registerName("init"));
     CGImageRef sentinel = MakeSentinel(240, 320);
-    if (!conv || !sentinel) { os_log(gLog, "[SELFTEST] 前置失败"); return; }
+    if (!sentinel) { os_log(gLog, "[SELFTEST] 前置失败"); return; }
 
     int before = gPBCalls;
-    CVPixelBufferRef pb = ((CVPixelBufferRef (*)(id, SEL, CGImageRef))objc_msgSend)(conv, sel, sentinel);
+    // 关键：按【类方法】形式调用（已确认它是 + 方法）
+    CVPixelBufferRef pb = ((CVPixelBufferRef (*)(id, SEL, CGImageRef))objc_msgSend)((id)c, sel, sentinel);
     int after = gPBCalls;
     CGImageRelease(sentinel);
 
@@ -181,18 +180,42 @@ static void RunSelfTest(void) {
 // ---------------- Hooks ----------------
 %hook NBPixelBufferConverter
 
-- (CVPixelBufferRef)pixelBufferFromCGImage:(CGImageRef)image {
+// ---- 类方法（真正的调用形式）----
++ (CVPixelBufferRef)pixelBufferFromCGImage:(CGImageRef)image {
     gPBCalls++;
-    if (gPBCalls == 1 || gPBCalls % 50 == 0) {
-        os_log(gLog, "[DIAG] pixelBufferFromCGImage #%d size=%zux%zu",
+    if (gPBCalls == 1 || gPBCalls % 50 == 0)
+        os_log(gLog, "[DIAG] +pixelBufferFromCGImage #%d size=%zux%zu",
                gPBCalls, CGImageGetWidth(image), CGImageGetHeight(image));
-    }
     if (!image || !OverrideEnabled()) return %orig;
     CGImageRef mine = FrameForSize(CGImageGetWidth(image), CGImageGetHeight(image));
-    if (!mine) {
-        os_log(gLog, "[DIAG] RenderFrame 返回 NULL，回落原生画面");
-        return %orig;
-    }
+    if (!mine) { os_log(gLog, "[DIAG] RenderFrame 返回 NULL"); return %orig; }
+    CVPixelBufferRef buf = %orig(mine);
+    CGImageRelease(mine);
+    return buf;
+}
+
++ (CVPixelBufferRef)pixelBufferFromCGImage_Mjpeg:(CGImageRef)image {
+    gMjpegCalls++;
+    if (gMjpegCalls == 1 || gMjpegCalls % 50 == 0)
+        os_log(gLog, "[DIAG] +Mjpeg #%d size=%zux%zu",
+               gMjpegCalls, CGImageGetWidth(image), CGImageGetHeight(image));
+    if (!image || !OverrideEnabled()) return %orig;
+    CGImageRef mine = FrameForSize(CGImageGetWidth(image), CGImageGetHeight(image));
+    if (!mine) return %orig;
+    CVPixelBufferRef buf = %orig(mine);
+    CGImageRelease(mine);
+    return buf;
+}
+
+// ---- 实例方法（备用，若某些调用点走实例形式）----
+- (CVPixelBufferRef)pixelBufferFromCGImage:(CGImageRef)image {
+    gPBCalls++;
+    if (gPBCalls == 1 || gPBCalls % 50 == 0)
+        os_log(gLog, "[DIAG] -pixelBufferFromCGImage #%d size=%zux%zu",
+               gPBCalls, CGImageGetWidth(image), CGImageGetHeight(image));
+    if (!image || !OverrideEnabled()) return %orig;
+    CGImageRef mine = FrameForSize(CGImageGetWidth(image), CGImageGetHeight(image));
+    if (!mine) { os_log(gLog, "[DIAG] RenderFrame 返回 NULL"); return %orig; }
     CVPixelBufferRef buf = %orig(mine);
     CGImageRelease(mine);
     return buf;
@@ -200,10 +223,9 @@ static void RunSelfTest(void) {
 
 - (CVPixelBufferRef)pixelBufferFromCGImage_Mjpeg:(CGImageRef)image {
     gMjpegCalls++;
-    if (gMjpegCalls == 1 || gMjpegCalls % 50 == 0) {
-        os_log(gLog, "[DIAG] MJPEG 分支 #%d size=%zux%zu",
+    if (gMjpegCalls == 1 || gMjpegCalls % 50 == 0)
+        os_log(gLog, "[DIAG] -Mjpeg #%d size=%zux%zu",
                gMjpegCalls, CGImageGetWidth(image), CGImageGetHeight(image));
-    }
     if (!image || !OverrideEnabled()) return %orig;
     CGImageRef mine = FrameForSize(CGImageGetWidth(image), CGImageGetHeight(image));
     if (!mine) return %orig;
@@ -233,7 +255,7 @@ static void RunSelfTest(void) {
 %ctor {
     gLog  = os_log_create("com.rev.projectionoverride", "general");
     gLock = [NSLock new];
-    os_log(gLog, "ProjectionOverride(Logos) loaded [DIAG v5 20261030b]");
+    os_log(gLog, "ProjectionOverride(Logos) loaded [DIAG v6 20261030c]");
 
     // 关键诊断：枚举已加载镜像，数一数有几个 Projection 副本
     {
