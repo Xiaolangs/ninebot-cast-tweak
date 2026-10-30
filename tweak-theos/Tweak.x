@@ -132,20 +132,6 @@ static CGImageRef MakeSentinel(int w, int h) {
     return img;
 }
 
-static void ReadCenterPixel(CVPixelBufferRef pb, int *r, int *g, int *b) {
-    *r = *g = *b = -1;
-    if (!pb) return;
-    CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
-    size_t w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb);
-    size_t bpr = CVPixelBufferGetBytesPerRow(pb);
-    uint8_t *base = (uint8_t *)CVPixelBufferGetBaseAddress(pb);
-    if (base) {
-        uint8_t *px = base + (h / 2) * bpr + (w / 2) * 4;   // BGRA
-        *b = px[0]; *g = px[1]; *r = px[2];
-    }
-    CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
-}
-
 static void RunSelfTest(void) {
     Class c = objc_getClass("NBPixelBufferConverter");
     if (!c) { os_log(gLog, "[SELFTEST] ❌ 类不存在"); return; }
