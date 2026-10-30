@@ -138,15 +138,12 @@ static void RunSelfTest(void) {
     if (!c) { os_log(gLog, "[SELFTEST] ❌ 类不存在"); return; }
 
     SEL sel = sel_registerName("pixelBufferFromCGImage:");
-    Method m = class_getInstanceMethod(c, sel);
-    os_log(gLog, "[SELFTEST] 类名=%{public}s 选择器存在=%{public}s",
-           class_getName(c), m ? "是" : "否");
-    if (!m) {
-        // 再探一层：是否为类方法 / 是否藏在父类
-        Method cm = class_getClassMethod(c, sel);
-        os_log(gLog, "[SELFTEST] 类方法=%{public}s", cm ? "是" : "否");
-        return;
-    }
+    Method im = class_getInstanceMethod(c, sel);
+    Method cm = class_getClassMethod(c, sel);
+    os_log(gLog, "[SELFTEST] 类名=%{public}s 实例方法=%{public}s 类方法=%{public}s",
+           class_getName(c), im ? "是" : "否", cm ? "是" : "否");
+    if (!im && !cm) { os_log(gLog, "[SELFTEST] ❌ 两种形式都不存在"); return; }
+    // 不再提前 return：下面继续做计数验证
 
     // 自绘能力自检（与 App 无关）
     CGImageRef mine = RenderFrame(240, 320);
@@ -255,7 +252,7 @@ static void RunSelfTest(void) {
 %ctor {
     gLog  = os_log_create("com.rev.projectionoverride", "general");
     gLock = [NSLock new];
-    os_log(gLog, "ProjectionOverride(Logos) loaded [DIAG v6 20261030c]");
+    os_log(gLog, "ProjectionOverride(Logos) loaded [DIAG v7 20261030d]");
 
     // 关键诊断：枚举已加载镜像，数一数有几个 Projection 副本
     {
