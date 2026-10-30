@@ -145,6 +145,54 @@ static void PresentByClassName(const char *clsName) {
     }
 }
 
+
+// 把某个 UIView 子类单独包成页面显示（用于直接看投屏类型选择器）
+static void PresentViewByClassName(const char *clsName) {
+    Class vCls = objc_getClass(clsName);
+    if (!vCls) { os_log(gLog, "[NAV] 视图类不存在: %{public}s", clsName); return; }
+    @try {
+        id app = ((id (*)(id, SEL))objc_msgSend)(objc_getClass("UIApplication"),
+                                                sel_registerName("sharedApplication"));
+        NSSet *scenes = ((id (*)(id, SEL))objc_msgSend)(app, sel_registerName("connectedScenes"));
+        Class sceneCls = objc_getClass("UIWindowScene");
+        id keyWindow = nil;
+        for (id sc in scenes) {
+            if (sceneCls && ![sc isKindOfClass:sceneCls]) continue;
+            for (id w in ((id (*)(id, SEL))objc_msgSend)(sc, sel_registerName("windows"))) {
+                if (((BOOL (*)(id, SEL))objc_msgSend)(w, sel_registerName("isKeyWindow"))) { keyWindow = w; break; }
+            }
+            if (keyWindow) break;
+        }
+        id root = keyWindow ? ((id (*)(id, SEL))objc_msgSend)(keyWindow, sel_registerName("rootViewController")) : nil;
+        if (!root) { os_log(gLog, "[NAV] 无 rootVC"); return; }
+
+        struct CGRect_Shim { double x, y, w, h; };
+        struct CGRect_Shim b = ((struct CGRect_Shim (*)(id, SEL))objc_msgSend)(
+            keyWindow, sel_registerName("bounds"));
+        struct CGRect_Shim f = {0, 0, b.w, b.h * 0.6};
+        id view = ((id (*)(id, SEL, struct CGRect_Shim))objc_msgSend)(
+            ((id (*)(id, SEL))objc_msgSend)((id)vCls, sel_registerName("alloc")),
+            sel_registerName("initWithFrame:"), f);
+        if (!view) { os_log(gLog, "[NAV] 视图创建失败"); return; }
+
+        id vc = ((id (*)(id, SEL, id, id))objc_msgSend)(
+            ((id (*)(id, SEL))objc_msgSend)(objc_getClass("UIViewController"), sel_registerName("alloc")),
+            sel_registerName("initWithNibName:bundle:"), nil, nil);
+        ((void (*)(id, SEL, id))objc_msgSend)(vc, sel_registerName("setView:"), view);
+
+        id nav = ((id (*)(id, SEL, id))objc_msgSend)(
+            ((id (*)(id, SEL))objc_msgSend)(objc_getClass("UINavigationController"),
+                                            sel_registerName("alloc")),
+            sel_registerName("initWithRootViewController:"), vc);
+        ((void (*)(id, SEL, id, BOOL, id))objc_msgSend)(root,
+            sel_registerName("presentViewController:animated:completion:"), nav, YES, ^{
+                os_log(gLog, "[NAV] 已显示视图 %{public}s", clsName);
+            });
+    } @catch (NSException *e) {
+        os_log(gLog, "[NAV] 显示 %{public}s 失败: %{public}s", clsName, e.reason.UTF8String ?: "?");
+    }
+}
+
 // ================= 帧导出（确认 App 是否在产帧）=================
 static int gDumpIdx = 0;
 static void DumpImage(CGImageRef img, const char *tag) {
@@ -385,7 +433,7 @@ static void RunSelfTest(void) {
 %ctor {
     gLog  = os_log_create("com.rev.projectionoverride", "general");
     gLock = [NSLock new];
-    os_log(gLog, "ProjectionOverride(Logos) loaded [DIAG v9 20261030f]");
+    os_log(gLog, "ProjectionOverride(Logos) loaded [DIAG v10 20261030g]");
 
     // 关键诊断：枚举已加载镜像，数一数有几个 Projection 副本
     {
@@ -414,9 +462,11 @@ static void RunSelfTest(void) {
         "_TtC7Vehicle27NaviScreenMirroringTypeView",
         "_TtC7Vehicle13RNDebugModule",
         "_TtC15NBDynamicModule19DynamicDebugManager",
-        "_TtC17NBRNPackageModule11BundleClass"
+        "_TtC17NBRNPackageModule11BundleClass",
+        "_TtC10NBMapModul9NBMapView",
+        "_TtC10NBMapModul18NavigationSettings"
     };
-    const int kNumClasses = 15;
+    const int kNumClasses = 17;
     for (int i = 0; i < kNumClasses; i++) {
         Class c = objc_getClass(names[i]);
         BOOL hasSel = NO;
@@ -440,6 +490,8 @@ static void RunSelfTest(void) {
         NSString *want = [[NSUserDefaults standardUserDefaults] stringForKey:@"POAutoPresent"];
         if ([want isEqualToString:@"none"]) { os_log(gLog, "[NAV] 按要求不自动打开"); return; }
         if ([want isEqualToString:@"debug"]) { OpenDebugTool(); return; }
-        PresentByClassName("_TtC7Vehicle13NaviSettingVC");
+        if ([want isEqualToString:@"navisetting"]) { PresentByClassName("_TtC7Vehicle13NaviSettingVC"); return; }
+        // 默认：直接显示投屏类型选择视图
+        PresentViewByClassName("_TtC7Vehicle27NaviScreenMirroringTypeView");
     });
 }
