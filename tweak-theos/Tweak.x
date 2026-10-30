@@ -103,6 +103,48 @@ static CGImageRef FrameForSize(size_t w, size_t h) {
 
 
 
+
+// ================= 直接打开指定页面（绕过坏掉的入口）=================
+static void PresentByClassName(const char *clsName) {
+    Class vcClass = objc_getClass(clsName);
+    if (!vcClass) { os_log(gLog, "[NAV] 类不存在: %{public}s", clsName); return; }
+    @try {
+        id app = ((id (*)(id, SEL))objc_msgSend)(objc_getClass("UIApplication"),
+                                                sel_registerName("sharedApplication"));
+        NSSet *scenes = ((id (*)(id, SEL))objc_msgSend)(app, sel_registerName("connectedScenes"));
+        Class sceneCls = objc_getClass("UIWindowScene");
+        id keyWindow = nil;
+        for (id sc in scenes) {
+            if (sceneCls && ![sc isKindOfClass:sceneCls]) continue;
+            for (id w in ((id (*)(id, SEL))objc_msgSend)(sc, sel_registerName("windows"))) {
+                if (((BOOL (*)(id, SEL))objc_msgSend)(w, sel_registerName("isKeyWindow"))) { keyWindow = w; break; }
+            }
+            if (keyWindow) break;
+        }
+        id root = keyWindow ? ((id (*)(id, SEL))objc_msgSend)(keyWindow, sel_registerName("rootViewController")) : nil;
+        if (!root) { os_log(gLog, "[NAV] 无 rootVC"); return; }
+
+        id vc = ((id (*)(id, SEL, id, id))objc_msgSend)(
+            ((id (*)(id, SEL))objc_msgSend)((id)vcClass, sel_registerName("alloc")),
+            sel_registerName("initWithNibName:bundle:"), nil, nil);
+        if (!vc) vc = ((id (*)(id, SEL))objc_msgSend)(
+            ((id (*)(id, SEL))objc_msgSend)((id)vcClass, sel_registerName("alloc")),
+            sel_registerName("init"));
+        if (!vc) { os_log(gLog, "[NAV] 实例化失败: %{public}s", clsName); return; }
+
+        id nav = ((id (*)(id, SEL, id))objc_msgSend)(
+            ((id (*)(id, SEL))objc_msgSend)(objc_getClass("UINavigationController"),
+                                            sel_registerName("alloc")),
+            sel_registerName("initWithRootViewController:"), vc);
+        ((void (*)(id, SEL, id, BOOL, id))objc_msgSend)(root,
+            sel_registerName("presentViewController:animated:completion:"), nav, YES, ^{
+                os_log(gLog, "[NAV] 已打开 %{public}s", clsName);
+            });
+    } @catch (NSException *e) {
+        os_log(gLog, "[NAV] 打开 %{public}s 失败: %{public}s", clsName, e.reason.UTF8String ?: "?");
+    }
+}
+
 // ================= 帧导出（确认 App 是否在产帧）=================
 static int gDumpIdx = 0;
 static void DumpImage(CGImageRef img, const char *tag) {
@@ -310,6 +352,20 @@ static void RunSelfTest(void) {
 
 %end
 
+%hook UIViewController
+- (void)presentViewController:(id)vc animated:(BOOL)animated completion:(id)completion {
+    os_log(gLog, "[NAV] present -> %{public}s", object_getClassName(vc));
+    %orig;
+}
+%end
+
+%hook UINavigationController
+- (void)pushViewController:(id)vc animated:(BOOL)animated {
+    os_log(gLog, "[NAV] push -> %{public}s", object_getClassName(vc));
+    %orig;
+}
+%end
+
 %hook NBVideoManager
 
 - (void)recordVideo:(id)target stopAfter:(BOOL)stopAfter {
@@ -329,7 +385,7 @@ static void RunSelfTest(void) {
 %ctor {
     gLog  = os_log_create("com.rev.projectionoverride", "general");
     gLock = [NSLock new];
-    os_log(gLog, "ProjectionOverride(Logos) loaded [DIAG v8 20261030e]");
+    os_log(gLog, "ProjectionOverride(Logos) loaded [DIAG v9 20261030f]");
 
     // 关键诊断：枚举已加载镜像，数一数有几个 Projection 副本
     {
@@ -353,9 +409,14 @@ static void RunSelfTest(void) {
         "_TtC20NBVideoFactoryModule28VideoSocketsConnetionManager",
         "_TtC20NBVideoFactoryModule13SnapshotTimer",
         "_TtC20NBVideoFactoryModule16NavConfigManager",
-        "_TtC20NBVideoFactoryModule19NavigationInfoModel"
+        "_TtC20NBVideoFactoryModule19NavigationInfoModel",
+        "_TtC7Vehicle13NaviSettingVC",
+        "_TtC7Vehicle27NaviScreenMirroringTypeView",
+        "_TtC7Vehicle13RNDebugModule",
+        "_TtC15NBDynamicModule19DynamicDebugManager",
+        "_TtC17NBRNPackageModule11BundleClass"
     };
-    const int kNumClasses = 10;
+    const int kNumClasses = 15;
     for (int i = 0; i < kNumClasses; i++) {
         Class c = objc_getClass(names[i]);
         BOOL hasSel = NO;
@@ -373,7 +434,12 @@ static void RunSelfTest(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)),
                    dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ RunSelfTest(); });
 
-    // 启动 10 秒后自动打开内置调试工具（含"模拟导航/视频投屏工具"）
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{ OpenDebugTool(); });
+    // 启动 12 秒后：默认直接打开「导航投屏设置」，可用 defaults 切换
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(12 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        NSString *want = [[NSUserDefaults standardUserDefaults] stringForKey:@"POAutoPresent"];
+        if ([want isEqualToString:@"none"]) { os_log(gLog, "[NAV] 按要求不自动打开"); return; }
+        if ([want isEqualToString:@"debug"]) { OpenDebugTool(); return; }
+        PresentByClassName("_TtC7Vehicle13NaviSettingVC");
+    });
 }
