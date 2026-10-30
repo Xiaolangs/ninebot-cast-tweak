@@ -1,0 +1,8 @@
+Package: com.rev.projectionoverride
+Name: ProjectionOverride
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: 整帧替换九号出行投屏导航画面（侧载注入用 dylib）
+Maintainer: rev
+Author: rev
+Section: Tweaks

@@ -1,0 +1,114 @@
+name: Build ProjectionOverride dylib
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'tweak-theos/**'
+      - 'tweak/**'
+      - '.github/workflows/build-dylib.yml'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ── 方案 A：Theos + Logos（推荐，产出 Logos 版）────────────────────
+  build-logos:
+    name: Theos (Logos) build
+    runs-on: macos-14          # arm64 runner，自带 Xcode + iPhoneOS SDK
+    env:
+      THEOS: ${{ github.workspace }}/theos
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Cache Theos
+        id: theos-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.THEOS }}
+          key: theos-${{ runner.os }}-${{ hashFiles('.github/workflows/build-dylib.yml') }}-v1
+
+      - name: Setup Theos
+        run: |
+          set -euo pipefail
+          # 缓存命中也可能因符号链接/子模块损坏而不可用，这里做自愈
+          if [ ! -f "$THEOS/makefiles/common.mk" ] || [ ! -f "$THEOS/bin/logos.pl" ]; then
+            rm -rf "$THEOS"
+            # --recursive 会拉取 vendor/logos 子模块（bin/logos.pl 指向它）
+            git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
+          fi
+          test -f "$THEOS/makefiles/common.mk"
+          test -f "$THEOS/bin/logos.pl"
+          perl "$THEOS/bin/logos.pl" 2>&1 | head -1 || true
+          echo "Theos ready at $THEOS"
+
+      - name: Build dylib
+        working-directory: tweak-theos
+        run: |
+          set -euo pipefail
+          make
+          echo "--- 产物定位 ---"
+          find .theos -name 'ProjectionOverride.dylib' -type f -print
+
+      - name: Verify dylib (arm64 / 无 substrate 依赖)
+        working-directory: tweak-theos
+        run: |
+          set -euo pipefail
+          DYLIB=$(find .theos -name 'ProjectionOverride.dylib' -type f | head -1)
+          test -n "$DYLIB" || { echo "::error::未找到 dylib"; exit 1; }
+          echo "dylib=$DYLIB"
+          file "$DYLIB"
+          # 必须是 arm64
+          file "$DYLIB" | grep -q 'arm64' || { echo "::error::不是 arm64"; exit 1; }
+          # install_name 必须是 @executable_path/...（侧载注入需要）
+          otool -D "$DYLIB" || true
+          # 关键：MSHookMessageEx 必须由本 dylib 定义，且未定义符号中不得残留 substrate
+          nm -gU "$DYLIB" | grep -q '_MSHookMessageEx' || { echo "::error::MSHookMessageEx 未定义"; exit 1; }
+          if nm -u "$DYLIB" | grep -qiE 'MSHookMessageEx'; then
+            echo "::error::仍依赖外部 substrate，侧载会崩"; exit 1
+          fi
+          echo "✅ 校验通过：自包含、无越狱依赖"
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp "$DYLIB" "$GITHUB_WORKSPACE/out/ProjectionOverride.dylib"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ProjectionOverride-logos
+          path: out/ProjectionOverride.dylib
+          if-no-files-found: error
+
+  # ── 方案 B：直接用 Xcode 的 iPhoneOS SDK 编译（无 Theos，兜底）──────
+  build-plain:
+    name: Plain clang build (no Theos)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build with iPhoneOS SDK
+        run: |
+          set -euo pipefail
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "SDK=$SDK"
+          clang -arch arm64 -miphoneos-version-min=13.0 -isysroot "$SDK" \
+            -dynamiclib -O2 -fobjc-arc \
+            -framework Foundation -framework CoreGraphics -framework CoreVideo -framework CoreText \
+            -install_name @executable_path/ProjectionOverride.dylib \
+            -o ProjectionOverride.dylib tweak/ProjectionOverride.m
+          file ProjectionOverride.dylib
+          nm -gU ProjectionOverride.dylib | head -5
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ProjectionOverride-plain
+          path: ProjectionOverride.dylib
+          if-no-files-found: error

@@ -1,0 +1,27 @@
+# —— 绝对不要提交：体积巨大且含原始 App 二进制 ——
+ipa_extract/
+ghidra_proj/
+analysis/
+tools/
+*.ipa
+*.dylib
+.theos/
+out/
+
+# 生成的 Logos 中间文件
+tweak-theos/Tweak.mm
+tweak-theos/logos.err
+
+# —— 证书与私钥：绝不入库 ——
+*.p12
+*.mobileprovision
+*.cer
+*.pem
+*.key
+密码*.txt
+
+# —— 工作区里的其他杂项，与本项目无关 ——
+ghome/
+.DS_Store
+Sweet-Module*
+ThemeRes-key-migration.diff
