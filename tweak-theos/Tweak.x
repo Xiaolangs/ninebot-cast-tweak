@@ -22,7 +22,9 @@
 
 static os_log_t    gLog     = NULL;
 static NSLock     *gLock    = nil;
-static BOOL        gCasting = NO;
+static int         gPBCalls = 0;      // pixelBufferFromCGImage: 调用次数
+static int         gMjpegCalls = 0;   // Mjpeg 分支次数
+static int         gEncCalls = 0;     // 编码输出次数
 
 static BOOL OverrideEnabled(void) {
     id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"NBProjectionOverride"];
@@ -100,16 +102,29 @@ static CGImageRef FrameForSize(size_t w, size_t h) {
 %hook NBPixelBufferConverter
 
 - (CVPixelBufferRef)pixelBufferFromCGImage:(CGImageRef)image {
-    if (!gCasting || !image || !OverrideEnabled()) return %orig;
+    gPBCalls++;
+    if (gPBCalls == 1 || gPBCalls % 50 == 0) {
+        os_log(gLog, "[DIAG] pixelBufferFromCGImage #%d size=%zux%zu",
+               gPBCalls, CGImageGetWidth(image), CGImageGetHeight(image));
+    }
+    if (!image || !OverrideEnabled()) return %orig;
     CGImageRef mine = FrameForSize(CGImageGetWidth(image), CGImageGetHeight(image));
-    if (!mine) return %orig;                       // 绘制失败 → 用原生画面
-    CVPixelBufferRef buf = %orig(mine);            // 仍走 App 的转换/编码逻辑
+    if (!mine) {
+        os_log(gLog, "[DIAG] RenderFrame 返回 NULL，回落原生画面");
+        return %orig;
+    }
+    CVPixelBufferRef buf = %orig(mine);
     CGImageRelease(mine);
     return buf;
 }
 
 - (CVPixelBufferRef)pixelBufferFromCGImage_Mjpeg:(CGImageRef)image {
-    if (!gCasting || !image || !OverrideEnabled()) return %orig;
+    gMjpegCalls++;
+    if (gMjpegCalls == 1 || gMjpegCalls % 50 == 0) {
+        os_log(gLog, "[DIAG] MJPEG 分支 #%d size=%zux%zu",
+               gMjpegCalls, CGImageGetWidth(image), CGImageGetHeight(image));
+    }
+    if (!image || !OverrideEnabled()) return %orig;
     CGImageRef mine = FrameForSize(CGImageGetWidth(image), CGImageGetHeight(image));
     if (!mine) return %orig;
     CVPixelBufferRef buf = %orig(mine);
@@ -122,14 +137,14 @@ static CGImageRef FrameForSize(size_t w, size_t h) {
 %hook NBVideoManager
 
 - (void)recordVideo:(id)target stopAfter:(BOOL)stopAfter {
-    gCasting = YES;
-    if (gLog) os_log(gLog, "recordVideo: casting=YES");
+    if (gLog) os_log(gLog, "[DIAG] recordVideo:stopAfter: 被调用");
     %orig;
 }
 
-- (void)stop {
-    gCasting = NO;
-    if (gLog) os_log(gLog, "stop: casting=NO");
+- (void)imageVideoEncoder:(id)encoder didEncodedImage:(id)image {
+    gEncCalls++;
+    if (gEncCalls == 1 || gEncCalls % 50 == 0)
+        os_log(gLog, "[DIAG] 编码输出帧 #%d", gEncCalls);
     %orig;
 }
 
@@ -138,5 +153,21 @@ static CGImageRef FrameForSize(size_t w, size_t h) {
 %ctor {
     gLog  = os_log_create("com.rev.projectionoverride", "general");
     gLock = [NSLock new];
-    if (gLog) os_log(gLog, "ProjectionOverride(Logos) loaded");
+    os_log(gLog, "ProjectionOverride(Logos) loaded [DIAG v2]");
+
+    const char *names[] = {
+        "NBPixelBufferConverter", "NBVideoManager",
+        "_TtC7Vehicle25NBProjectionScreenManager",
+        "_TtC20NBVideoFactoryModule15NavigationViewBuilder",
+        "_TtC20NBVideoFactoryModule14VideoGenerator"
+    };
+    for (int i = 0; i < 5; i++) {
+        Class c = objc_getClass(names[i]);
+        BOOL hasSel = NO;
+        if (c && i == 0)
+            hasSel = class_getInstanceMethod(c, @selector(pixelBufferFromCGImage:)) != NULL;
+        os_log(gLog, "[DIAG] class %{public}s -> %{public}s%s",
+               names[i], c ? "存在" : "不存在",
+               hasSel ? " (含 pixelBufferFromCGImage:)" : "");
+    }
 }
