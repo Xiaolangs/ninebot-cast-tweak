@@ -99,6 +99,20 @@ static CGImageRef FrameForSize(size_t w, size_t h) {
 }
 
 
+// ================= 运行时选择器导出 =================
+#import <objc/runtime.h>
+
+static void DumpSelectors(const char *clsName, int maxCount) {
+    Class c = objc_getClass(clsName);
+    if (!c) { os_log(gLog, "[DIAG] %{public}s 不存在", clsName); return; }
+    unsigned int n = 0;
+    Method *ms = class_copyMethodList(c, &n);
+    os_log(gLog, "[DIAG] %{public}s: %u 个方法%s", clsName, n, n > maxCount ? "（截断）" : "");
+    for (unsigned int i = 0; i < n && i < (unsigned int)maxCount; i++)
+        os_log(gLog, "[DIAG]    -%{public}s", sel_getName(method_getName(ms[i])));
+    free(ms);
+}
+
 // ================= 无车辆自检 =================
 // 原理：传入一张纯红哨兵图调用被 hook 的方法。
 //   hook 生效 → 红图被替换成我们的深色画面 → 采样点不是红色
@@ -219,10 +233,16 @@ static void RunSelfTest(void) {
     const char *names[] = {
         "NBPixelBufferConverter", "NBVideoManager",
         "_TtC7Vehicle25NBProjectionScreenManager",
-        "_TtC20NBVideoFactoryModule15NavigationViewBuilder",
-        "_TtC20NBVideoFactoryModule14VideoGenerator"
+        "_TtC20NBVideoFactoryModule21NavigationViewBuilder",
+        "_TtC20NBVideoFactoryModule14VideoGenerator",
+        "_TtC20NBVideoFactoryModule21NavigationViewHandler",
+        "_TtC20NBVideoFactoryModule28VideoSocketsConnetionManager",
+        "_TtC20NBVideoFactoryModule13SnapshotTimer",
+        "_TtC20NBVideoFactoryModule16NavConfigManager",
+        "_TtC20NBVideoFactoryModule19NavigationInfoModel"
     };
-    for (int i = 0; i < 5; i++) {
+    const int kNumClasses = 10;
+    for (int i = 0; i < kNumClasses; i++) {
         Class c = objc_getClass(names[i]);
         BOOL hasSel = NO;
         if (c && i == 0)
@@ -231,6 +251,9 @@ static void RunSelfTest(void) {
                names[i], c ? "存在" : "不存在",
                hasSel ? " (含 pixelBufferFromCGImage:)" : "");
     }
+
+    // 运行时导出选择器，消除对 mangled/选择器名的猜测
+    for (int i = 0; i < kNumClasses; i++) DumpSelectors(names[i], 24);
 
     // 启动 5 秒后自检（等 App 完成 launch，避免干扰）
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)),
