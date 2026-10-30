@@ -6,6 +6,7 @@
 #import <CoreGraphics/CoreGraphics.h>
 #import <CoreVideo/CoreVideo.h>
 #import <CoreText/CoreText.h>
+#import <ImageIO/ImageIO.h>
 #import <os/log.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
@@ -193,7 +194,6 @@ static void DumpSelectors(const char *clsName, int maxCount) {
 //   hook 未生效 → 原样转换 → 采样点是红色
 #import <objc/message.h>
 #import <mach-o/dyld.h>
-#import <ImageIO/ImageIO.h>
 
 static CGImageRef MakeSentinel(int w, int h) {
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
