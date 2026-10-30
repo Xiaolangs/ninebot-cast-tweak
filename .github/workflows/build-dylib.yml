@@ -50,6 +50,17 @@ jobs:
           perl "$THEOS/bin/logos.pl" 2>&1 | head -1 || true
           echo "Theos ready at $THEOS"
 
+      - name: Install ldid
+        run: |
+          # Theos 用 ldid 给 dylib 做伪签名；runner 默认没有
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install ldid || {
+            echo "brew 失败，改用预编译 ldid"
+            curl -fsSL -o /tmp/ldid \
+              https://github.com/ProcursusTeam/ldid/releases/latest/download/ldid_macosx_arm64
+            chmod +x /tmp/ldid && sudo mv /tmp/ldid /usr/local/bin/ldid
+          }
+          ldid -h 2>&1 | head -2 || true
+
       - name: Build dylib
         working-directory: tweak-theos
         run: |
