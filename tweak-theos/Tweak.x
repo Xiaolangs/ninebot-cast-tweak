@@ -418,32 +418,20 @@ static void RunSelfTest(void) {
 
 - (id)containerURLForSecurityApplicationGroupIdentifier:(NSString *)group {
     id url = %orig;
-    static int once = 0;
-    if (!url && group) {
-        if (once++ < 8)
-            os_log(gLog, "[FIX] AppGroup 容器为空: %{public}s（重签所致）→ 使用沙盒目录兜底",
-                   group.UTF8String);
-        return GroupFallback(group);
+    static int probes = 0;
+    if (!url && group && probes++ < 6) {
+        BOOL fix = [[NSUserDefaults standardUserDefaults] boolForKey:@"POAppGroupFix"];
+        os_log(gLog, "[PROBE] AppGroup 容器为空: %{public}s（POAppGroupFix=%{public}s）",
+               group.UTF8String, fix ? "YES" : "NO");
+        // 默认只观察不改行为；显式开启后才兜底
+        if (fix) return GroupFallback(group);
     }
-    if (url && once < 8) { once++; os_log(gLog, "[FIX] AppGroup 正常: %{public}s", group.UTF8String); }
-    return url;
+    return url;   // 行为与原生完全一致
 }
 
 %end
 
-%hook NSUserDefaults
 
-- (id)initWithSuiteName:(NSString *)suite {
-    id d = %orig;
-    if (!d && suite) {
-        os_log(gLog, "[FIX] suite defaults 失败: %{public}s → 回退 standard",
-               suite.UTF8String);
-        return ((id (*)(id, SEL))objc_msgSend)((id)self, sel_registerName("init"));
-    }
-    return d;
-}
-
-%end
 
 %hook UIViewController
 - (void)presentViewController:(id)vc animated:(BOOL)animated completion:(id)completion {
@@ -478,7 +466,7 @@ static void RunSelfTest(void) {
 %ctor {
     gLog  = os_log_create("com.rev.projectionoverride", "general");
     gLock = [NSLock new];
-    os_log(gLog, "ProjectionOverride(Logos) loaded [DIAG v11 20261030h]");
+    os_log(gLog, "ProjectionOverride(Logos) loaded [DIAG v12 20261030i]");
 
     // 关键诊断：枚举已加载镜像，数一数有几个 Projection 副本
     {
