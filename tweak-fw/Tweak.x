@@ -202,9 +202,70 @@ static void DumpArchive(NSString *path, const char *how) {
 }
 %end
 
+
+// ===== 伪造部件版本，让服务端认为需要升级 =====
+// 请求契约：POST /iot_ota/ota/get-last-firmware
+//   {"parts":[{"part_type":"TFT","version":"<n>","pn":"<pn>"}, ...]}
+// 只要把 TFT 的 version 改小，服务端就会下发更新包。
+// 配置：POTftFakeVersion（默认 0）；POFakeParts（默认 "TFT"）
+static NSString *FakeVersion(void) {
+    id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"POTftFakeVersion"];
+    NSString *s = v ? [v description] : @"0";
+    return s.length ? s : @"0";
+}
+static NSArray<NSString *> *FakeParts(void) {
+    id v = [[NSUserDefaults standardUserDefaults] objectForKey:@"POFakeParts"];
+    NSString *s = [v isKindOfClass:[NSString class]] ? (NSString *)v : @"TFT";
+    return [s componentsSeparatedByString:@","];
+}
+
+// 返回改写后的字符串；没改动返回 nil
+static NSString *RewriteOtaBody(NSString *body) {
+    if (!body.length || ![body containsString:@"part_type"]) return nil;
+    NSString *result = body;
+    for (NSString *part in FakeParts()) {
+        NSString *trimmed = [part stringByTrimmingCharactersInSet:
+                             [NSCharacterSet whitespaceCharacterSet]];
+        if (!trimmed.length) continue;
+        NSString *pat = [NSString stringWithFormat:
+            @"(\"part_type\"\\s*:\\s*\"%@\"\\s*,\\s*\"version\"\\s*:\\s*\")([^\"]*)(\")", trimmed];
+        NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:pat options:0 error:nil];
+        if (!re) continue;
+        NSRange full = NSMakeRange(0, result.length);
+        NSUInteger hits = [re numberOfMatchesInString:result options:0 range:full];
+        if (hits == 0) continue;
+        result = [re stringByReplacingMatchesInString:result options:0 range:full
+                                          withTemplate:[NSString stringWithFormat:@"$1%@$3", FakeVersion()]];
+        Emit("[OTA] 已改写版本", "part=%s -> %s (命中 %lu 处)", trimmed.UTF8String,
+             FakeVersion().UTF8String, (unsigned long)hits);
+    }
+    return [result isEqualToString:body] ? nil : result;
+}
+
 %hook NSMutableURLRequest
 - (void)setHTTPBody:(id)body {
     if (LooksJSON(body) && DataHasKW((NSData *)body)) EmitFull("[REQ]", Plain(body));
+
+    // 只处理 OTA 检查请求
+    id url = ((id (*)(id, SEL))objc_msgSend)(self, NSSelectorFromString(@"URL"));
+    id us  = url ? ((id (*)(id, SEL))objc_msgSend)(url, NSSelectorFromString(@"absoluteString")) : nil;
+    if ([us isKindOfClass:[NSString class]] && [(NSString *)us containsString:@"get-last-firmware"]
+        && [body isKindOfClass:[NSData class]]) {
+        NSString *txt = [[NSString alloc] initWithData:(NSData *)body encoding:NSUTF8StringEncoding];
+        if (txt.length) {
+            Emit("[OTA] 请求体", "%s", txt.length > 700 ? [[txt substringToIndex:700] UTF8String] : txt.UTF8String);
+            NSString *mod = RewriteOtaBody(txt);
+            if (mod) {
+                NSData *nd = [mod dataUsingEncoding:NSUTF8StringEncoding];
+                Emit("[OTA] 改写后", "len %lu -> %lu", (unsigned long)((NSData *)body).length,
+                     (unsigned long)nd.length);
+                %orig(nd);
+                return;
+            }
+        } else {
+            Emit("[OTA] 请求体非明文", "可能是加密后提交，需要改在更高层");
+        }
+    }
     %orig;
 }
 %end
@@ -462,6 +523,6 @@ static void DumpStack(const char *why, NSString *detail) {
 
 %ctor {
     gLog = os_log_create("com.rev.themeprobe", "general");
-    os_log(gLog, "FirmwareProbe 1.0 已加载（固件/OTA 取证）");
+    os_log(gLog, "FirmwareProbe 1.1 已加载（OTA 取证 + 版本伪造）");
     os_log(gLog, "[BEAT] 心跳：%{public}s", "启动完成，等待固件/OTA 流程");
 }
