@@ -83,7 +83,7 @@ static void EmitFull(const char *tag, NSString *text) {
 
 static void Emit(const char *tag, const char *fmt, ...) {
     if (gLines >= TP_MAX_LINES || !RateOK()) return;
-    char buf[600];
+    char buf[2048];
     va_list ap; va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
@@ -399,8 +399,67 @@ static void DumpData(id data, NSString *hint, const char *how) {
 
 %end
 
+
+// ===== 弹窗/提示 调用栈追踪 =====
+// 目的：点击仪表皮肤出现"未连接"提示时，把调用栈打出来，
+// 直接定位是哪个类/方法做的连接判断（避免盲目 hook）。
+static int gStackN = 0;
+
+static void DumpStack(const char *why, NSString *detail) {
+    if (gStackN >= 6) return;      // 最多 6 次，避免刷屏
+    gStackN++;
+    NSArray *frames = [NSThread callStackSymbols];
+    NSMutableString *st = [NSMutableString string];
+    NSUInteger n = MIN((NSUInteger)16, frames.count);
+    for (NSUInteger i = 1; i < n; i++) [st appendFormat:@" <- %@", frames[i]];
+    Emit("[STACK] 提示出现", "%s | %s%s", why,
+         detail.length > 120 ? [[detail substringToIndex:120] UTF8String] : detail.UTF8String,
+         st.UTF8String);
+}
+
+%hook UIAlertController
+
++ (id)alertControllerWithTitle:(id)title message:(id)msg preferredStyle:(long)style {
+    NSString *d = [NSString stringWithFormat:@"title=%@ msg=%@",
+                   [title isKindOfClass:[NSString class]] ? title : @"(nil)",
+                   [msg isKindOfClass:[NSString class]] ? msg : @"(nil)"];
+    DumpStack("UIAlertController", d);
+    return %orig;
+}
+
+%end
+
+// Toast 通常是发通知或调 UIView 扩展
+%hook NSNotificationCenter
+
+- (void)postNotificationName:(id)name object:(id)obj userInfo:(id)info {
+    if ([name isKindOfClass:[NSString class]]) {
+        NSString *low = ((NSString *)name).lowercaseString;
+        if ([low containsString:@"toast"] || [low containsString:@"hud"] ||
+            [low containsString:@"alert"])
+            DumpStack(((NSString *)name).UTF8String,
+                      [NSString stringWithFormat:@"userInfo=%@", info]);
+    }
+    %orig;
+}
+
+%end
+
+%hook UIView
+
+- (void)showToast:(id)msg {
+    DumpStack("UIView.showToast", [NSString stringWithFormat:@"msg=%@", msg]);
+    %orig;
+}
+- (void)showToast:(id)msg duration:(double)d {
+    DumpStack("UIView.showToast:duration:", [NSString stringWithFormat:@"msg=%@", msg]);
+    %orig;
+}
+
+%end
+
 %ctor {
     gLog = os_log_create("com.rev.themeprobe", "general");
-    os_log(gLog, "ThemeProbe 1.4 已加载（仅皮肤相关，安全转储）");
+    os_log(gLog, "ThemeProbe 1.5 已加载（含弹窗调用栈追踪）");
     os_log(gLog, "[BEAT] 心跳：%{public}s", "启动完成，等待皮肤资源流程");
 }
