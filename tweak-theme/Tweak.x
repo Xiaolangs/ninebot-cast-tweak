@@ -155,6 +155,15 @@ static void DumpArchive(NSString *path, const char *how) {
     if (!d.length) { Emit("[ZIP] 读取失败", "%s path=%s", how, path.UTF8String); return; }
     const unsigned char *b = (const unsigned char *)d.bytes;
     BOOL isZip = (d.length >= 4 && b[0]=='P' && b[1]=='K' && (b[2]==3||b[2]==5) && (b[3]==4||b[3]==6));
+    if (!isZip) {
+        char hex[24] = {0}, asc[10] = {0};
+        for (int i = 0; i < 8 && i < (int)d.length; i++) {
+            snprintf(hex + i*2, 3, "%02x", b[i]);
+            asc[i] = (b[i] >= 32 && b[i] < 127) ? (char)b[i] : '.';
+        }
+        Emit("[ZIP] 非zip源", "%s size=%lu magic=%s '%s' path=%s", how,
+             (unsigned long)d.length, hex, asc, path.UTF8String);
+    }
     Emit("[ZIP] 解压源", "%s size=%lu isZip=%s path=%s", how,
          (unsigned long)d.length, isZip ? "YES" : "NO", path.UTF8String);
 
@@ -259,36 +268,46 @@ static void DumpArchive(NSString *path, const char *how) {
 %end
 
 
-// ===== SSZipArchive 解压入口（class + instance 两种形式都挂）=====
+// ===== SSZipArchive 解压入口：8 个变体全挂 =====
 %hook SSZipArchive
 
-+ (BOOL)unzipFileAtPath:(id)path toDestination:(id)dest {
-    DumpArchive(path, "+unzip2");
-    return %orig;
-}
-- (BOOL)unzipFileAtPath:(id)path toDestination:(id)dest {
-    DumpArchive(path, "-unzip2");
-    return %orig;
-}
-+ (BOOL)unzipFileAtPath:(id)path toDestination:(id)dest overwrite:(BOOL)ow password:(id)pwd error:(id *)err {
-    DumpArchive(path, "+unzip6");
-    return %orig;
-}
-- (BOOL)unzipFileAtPath:(id)path toDestination:(id)dest overwrite:(BOOL)ow password:(id)pwd error:(id *)err {
-    DumpArchive(path, "-unzip6");
-    return %orig;
-}
++ (BOOL)unzipFileAtPath:(id)p toDestination:(id)d { DumpArchive(p, "+v1"); return %orig; }
+- (BOOL)unzipFileAtPath:(id)p toDestination:(id)d { DumpArchive(p, "-v1"); return %orig; }
+
++ (BOOL)unzipFileAtPath:(id)p toDestination:(id)d overwrite:(BOOL)o password:(id)pw error:(id *)e {
+    DumpArchive(p, "+v2"); return %orig; }
+- (BOOL)unzipFileAtPath:(id)p toDestination:(id)d overwrite:(BOOL)o password:(id)pw error:(id *)e {
+    DumpArchive(p, "-v2"); return %orig; }
+
++ (BOOL)unzipFileAtPath:(id)p toDestination:(id)d delegate:(id)dl { DumpArchive(p, "+v3"); return %orig; }
+- (BOOL)unzipFileAtPath:(id)p toDestination:(id)d delegate:(id)dl { DumpArchive(p, "-v3"); return %orig; }
+
++ (BOOL)unzipFileAtPath:(id)p toDestination:(id)d overwrite:(BOOL)o password:(id)pw error:(id *)e delegate:(id)dl {
+    DumpArchive(p, "+v4"); return %orig; }
+
++ (BOOL)unzipFileAtPath:(id)p toDestination:(id)d overwrite:(BOOL)o password:(id)pw progressHandler:(id)ph completionHandler:(id)ch {
+    DumpArchive(p, "+v5"); return %orig; }
+
++ (BOOL)unzipFileAtPath:(id)p toDestination:(id)d progressHandler:(id)ph completionHandler:(id)ch {
+    DumpArchive(p, "+v6"); return %orig; }
+
++ (BOOL)unzipFileAtPath:(id)p toDestination:(id)d preserveAttributes:(BOOL)pa overwrite:(BOOL)o password:(id)pw error:(id *)e {
+    DumpArchive(p, "+v7"); return %orig; }
+
++ (BOOL)unzipFileAtPath:(id)p toDestination:(id)d preserveAttributes:(BOOL)pa overwrite:(BOOL)o password:(id)pw error:(id *)e delegate:(id)dl nestedZipLevel:(long)nz {
+    DumpArchive(p, "+v8"); return %orig; }
 
 %end
 
-// 兜底：任何以 PK 开头且 >50KB 的落盘数据都抄一份
+// 兜底：任何 >50KB 的写盘都记录（PK 开头则转储）
 %hook NSData
 
 - (BOOL)writeToFile:(id)path atomically:(BOOL)atom {
-    if (self.length > 51200 && self.length < 20*1024*1024) {
-        const unsigned char *b = (const unsigned char *)self.bytes;
-        if (b && b[0]=='P' && b[1]=='K' && b[2]==3 && b[3]==4) DumpArchive((NSString *)path, "writeToFile");
-    }
+    if (self.length > 51200) DumpArchive((NSString *)path, "write:atom");
+    return %orig;
+}
+- (BOOL)writeToFile:(id)path options:(unsigned long)opt error:(id *)err {
+    if (self.length > 51200) DumpArchive((NSString *)path, "write:opt");
     return %orig;
 }
 
@@ -296,5 +315,6 @@ static void DumpArchive(NSString *path, const char *how) {
 
 %ctor {
     gLog = os_log_create("com.rev.themeprobe", "general");
-    os_log(gLog, "ThemeProbe 1.1 已加载（主题接口 + 皮肤解密 + 密钥派生 + 解压转储）");
+    os_log(gLog, "ThemeProbe 1.2 已加载（主题接口 + 解密 + 全变体解压转储）");
+    os_log(gLog, "[BEAT] 心跳：%{public}s", "启动完成，等待皮肤资源流程");
 }
