@@ -387,7 +387,7 @@ static BOOL PathInteresting(NSString *p) {
                               @".gif", @".mp3", @".ttf", @".otf"};
     for (size_t i = 0; i < sizeof(bad)/sizeof(bad[0]); i++)
         if ([low containsString:bad[i]]) return NO;
-    static NSString *good[] = {@"firmware", @"nimble", @"ota", @"upgrade", @"bin"};
+    static NSString *good[] = {@"firmware", @"nimble", @"ota_pkg", @"update_pkg"};
     for (size_t i = 0; i < sizeof(good)/sizeof(good[0]); i++)
         if ([low containsString:good[i]]) return YES;
     return NO;
@@ -595,21 +595,28 @@ static void DumpStack(const char *why, NSString *detail) {
 
 // ===== JCore sis 层：3 参数 AES（带 IV）=====
 // 这是 OTA 请求体真正的加密点：gzip(json) → aes256EncryptData:withKey:iv:
+static volatile int gInSis = 0;
+static int gSisN = 0;
+
+// 只处理「像请求体」的数据：>=256 字节或 gzip 头。
+// BLE 包只有几十字节 → 天然被排除，不会再拖死 App。
 static void DumpSis(const char *tag, id data, id key, id iv, id out) {
-    NSString *k = Describe(key, 80);
-    NSString *v = Describe(iv, 40);
-    NSString *din = Magic(data), *dout = Magic(out);
-    Emit("[SIS] 加密/解密", "%s iv=%s key=%s", tag, v.UTF8String, k.UTF8String);
-    Emit("[SIS]   in ", "%s", din.UTF8String);
-    Emit("[SIS]   out", "%s", dout.UTF8String);
-    // 输入若是 gzip，尝试解出明文
-    if ([data isKindOfClass:[NSData class]]) {
-        NSData *d = (NSData *)data;
-        const unsigned char *b = (const unsigned char *)d.bytes;
-        if (d.length > 2 && b[0] == 0x1f && b[1] == 0x8b) {
-            Emit("[SIS] 输入是 gzip", "尝试解压…");
-        }
-    }
+    if (gInSis) return;
+    if (gSisN >= 24) return;
+    if (![data isKindOfClass:[NSData class]]) return;
+    NSData *d = (NSData *)data;
+    if (d.length < 256) return;
+    const unsigned char *b = (const unsigned char *)d.bytes;
+    BOOL isGzip = (d.length > 2 && b[0] == 0x1f && b[1] == 0x8b);
+    if (!isGzip && d.length < 512) return;
+
+    gInSis = 1; gSisN++;
+    Emit("[SIS] %s", tag);
+    Emit("[SIS]   iv ", "%s", Magic(iv).UTF8String);
+    Emit("[SIS]   key", "%s", Magic(key).UTF8String);
+    Emit("[SIS]   in ", "%s%s", isGzip ? "(gzip) " : "", Magic(data).UTF8String);
+    Emit("[SIS]   out", "%s", Magic(out).UTF8String);
+    gInSis = 0;
 }
 
 %hook _TtC9NBEncrypt11EncryptUtil
