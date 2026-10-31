@@ -1,6 +1,7 @@
-// KeyBodyProbe 1.0 — 只钩两个「已验证不崩」的点，拿到 密钥 + 请求体
+// KeyBodyProbe 1.1 — 只钩两个「已验证不崩」的点，拿到 密钥 + 请求体
 //
-//   1) +/-[JCOREDataSecurity encryptKeyForHttp:]   每请求一次，返回 AES 密钥
+//   1) +/-[JCOREDataSecurity rsaEncrypt:publicKey:]  ★ 入参就是 AES 密钥（k=RSA(key)）
+//      以及 encryptKeyForHttp: 作为参考
 //   2) -[NSMutableURLRequest setHTTPBody:]         每请求一次，body 就是 wire JSON
 //
 // 不碰 gzip: / aesEncryptData: / aes256EncryptData: —— 那些是前几次闪退的来源。
@@ -56,6 +57,18 @@ static void RememberKey(id key) {
 
 %hook JCOREDataSecurity
 
+// k = RSA(aesKey) → 这里的入参 data 就是本次请求真正的 AES 密钥
++ (id)rsaEncrypt:(id)data publicKey:(id)pk {
+    id r = %orig;
+    RememberKey(data);
+    return r;
+}
+- (id)rsaEncrypt:(id)data publicKey:(id)pk {
+    id r = %orig;
+    RememberKey(data);
+    return r;
+}
+
 + (id)encryptKeyForHttp:(unsigned int *)out {
     id r = %orig;
     RememberKey(r);
@@ -96,5 +109,5 @@ static void RememberKey(id key) {
 
 %ctor {
     gLog = os_log_create("com.rev.keybody", "general");
-    os_log(gLog, "KeyBodyProbe 1.0 已加载（密钥 + wire 请求体）");
+    os_log(gLog, "KeyBodyProbe 1.1 已加载（RSA 入参=真实AES密钥 + wire 请求体）");
 }
