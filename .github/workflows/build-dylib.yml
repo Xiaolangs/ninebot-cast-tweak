@@ -9,6 +9,7 @@ on:
       - 'tweak-net/**'
       - 'tweak-key/**'
       - 'tweak-theme/**'
+      - 'tweak-fw/**'
       - '.github/workflows/build-dylib.yml'
   pull_request:
   workflow_dispatch:
@@ -239,4 +240,36 @@ jobs:
         with:
           name: ThemeProbe
           path: out/ThemeProbe.dylib
+          if-no-files-found: error
+
+  build-fw:
+    name: FirmwareProbe build
+    runs-on: macos-14
+    env:
+      THEOS: ${{ github.workspace }}/theos
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Theos
+        run: |
+          set -euo pipefail
+          if [ ! -f "$THEOS/makefiles/common.mk" ] || [ ! -f "$THEOS/bin/logos.pl" ]; then
+            rm -rf "$THEOS"; git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
+          fi
+      - name: Install ldid
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install ldid || true
+      - name: Build FirmwareProbe
+        working-directory: tweak-fw
+        run: |
+          set -euo pipefail
+          make
+          DYLIB=$(find .theos -name 'FirmwareProbe.dylib' | head -1)
+          test -n "$DYLIB"
+          nm -gU "$DYLIB" | grep -q _MSHookMessageEx
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp "$DYLIB" "$GITHUB_WORKSPACE/out/FirmwareProbe.dylib"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FirmwareProbe
+          path: out/FirmwareProbe.dylib
           if-no-files-found: error
