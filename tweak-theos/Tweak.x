@@ -195,11 +195,199 @@ static void NoteFrame(size_t w, size_t h) {
 
 %end
 
+
+// ================= 模拟投屏（本地全屏预览）=================
+typedef struct { double x, y, w, h; } PORect;
+typedef struct { double a, b, c, d, tx, ty; } POAffine;
+
+@interface POSimTarget : NSObject
+- (void)handleTap:(id)sender;
+- (void)handleButton:(id)sender;
+- (void)tick:(id)timer;
+@end
+
+static id  gPreviewTimer = nil;
+static int gPreviewTick = 0;
+
+static id KeyWindow(void) {
+    id app = ((id (*)(id, SEL))objc_msgSend)(objc_getClass("UIApplication"),
+                                            sel_registerName("sharedApplication"));
+    if (!app) return nil;
+    NSSet *scenes = ((id (*)(id, SEL))objc_msgSend)(app, sel_registerName("connectedScenes"));
+    Class sceneCls = objc_getClass("UIWindowScene");
+    for (id sc in scenes) {
+        if (sceneCls && ![sc isKindOfClass:sceneCls]) continue;
+        for (id w in ((id (*)(id, SEL))objc_msgSend)(sc, sel_registerName("windows"))) {
+            if (((BOOL (*)(id, SEL))objc_msgSend)(w, sel_registerName("isKeyWindow"))) return w;
+        }
+    }
+    return nil;
+}
+
+static id RootVC(void) {
+    id w = KeyWindow();
+    return w ? ((id (*)(id, SEL))objc_msgSend)(w, sel_registerName("rootViewController")) : nil;
+}
+
+static id FindLabel(id view, NSString *needle, int depth) {
+    if (!view || depth > 40) return nil;
+    if (((BOOL (*)(id, SEL, id))objc_msgSend)(view, sel_registerName("isKindOfClass:"),
+                                          objc_getClass("UILabel"))) {
+        id text = ((id (*)(id, SEL))objc_msgSend)(view, sel_registerName("text"));
+        if (text && [text isKindOfClass:[NSString class]] && [text containsString:needle]) return view;
+    }
+    for (id sv in ((id (*)(id, SEL))objc_msgSend)(view, sel_registerName("subviews"))) {
+        id hit = FindLabel(sv, needle, depth + 1);
+        if (hit) return hit;
+    }
+    return nil;
+}
+
+@implementation POSimTarget
+
+- (void)openPreview {
+    id root = RootVC();
+    id win  = KeyWindow();
+    if (!root || !win) { os_log(gLog, "[SIM] 无窗口，无法预览"); return; }
+
+    PORect b = ((PORect (*)(id, SEL))objc_msgSend)(win, sel_registerName("bounds"));
+
+    id vc = ((id (*)(id, SEL, id, id))objc_msgSend)(
+        ((id (*)(id, SEL))objc_msgSend)(objc_getClass("UIViewController"), sel_registerName("alloc")),
+        sel_registerName("initWithNibName:bundle:"), nil, nil);
+    if (!vc) { os_log(gLog, "[SIM] VC 创建失败"); return; }
+
+    PORect full = {0, 0, b.w, b.h};
+    id view = ((id (*)(id, SEL, PORect))objc_msgSend)(
+        ((id (*)(id, SEL))objc_msgSend)(objc_getClass("UIView"), sel_registerName("alloc")),
+        sel_registerName("initWithFrame:"), full);
+    ((void (*)(id, SEL, id))objc_msgSend)(view, sel_registerName("setBackgroundColor:"),
+        ((id (*)(id, SEL))objc_msgSend)(objc_getClass("UIColor"), sel_registerName("blackColor")));
+    ((void (*)(id, SEL, id))objc_msgSend)(vc, sel_registerName("setView:"), view);
+
+    PORect f = {0, 0, b.w, b.w * 320.0 / 240.0};
+    f.y = (b.h - f.h) / 2.0;
+    id iv = ((id (*)(id, SEL, PORect))objc_msgSend)(
+        ((id (*)(id, SEL))objc_msgSend)(objc_getClass("UIImageView"), sel_registerName("alloc")),
+        sel_registerName("initWithFrame:"), f);
+    ((void (*)(id, SEL, id))objc_msgSend)(view, sel_registerName("addSubview:"), iv);
+
+    // 车机按 180° 显示，预览反向旋转 → 肉眼所见即车机所见
+    id o = [[NSUserDefaults standardUserDefaults] objectForKey:@"POOrientation"];
+    int deg = o ? [o intValue] : 180;
+    if (deg == 180) {
+        POAffine t = {-1, 0, 0, -1, 0, 0};
+        ((void (*)(id, SEL, POAffine))objc_msgSend)(iv, sel_registerName("setTransform:"), t);
+    }
+
+    ((void (*)(id, SEL, id, BOOL, id))objc_msgSend)(root,
+        sel_registerName("presentViewController:animated:completion:"), vc, YES, ^{
+            os_log(gLog, "[SIM] 模拟投屏已打开（点击画面可关闭）");
+        });
+
+    gPreviewTick = 0;
+    gPreviewTimer = ((id (*)(id, SEL, double, id, SEL, id, BOOL))objc_msgSend)(
+        objc_getClass("NSTimer"),
+        sel_registerName("scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:"),
+        0.04, self, sel_registerName("tick:"), iv, YES);
+
+    // 点击画面关闭
+    ((void (*)(id, SEL, BOOL))objc_msgSend)(view, sel_registerName("setUserInteractionEnabled:"), YES);
+    id gr = ((id (*)(id, SEL, id, SEL))objc_msgSend)(
+        ((id (*)(id, SEL))objc_msgSend)(objc_getClass("UITapGestureRecognizer"), sel_registerName("alloc")),
+        sel_registerName("initWithTarget:action:"), self, sel_registerName("handleButton:"));
+    ((void (*)(id, SEL, id))objc_msgSend)(view, sel_registerName("addGestureRecognizer:"), gr);
+    os_log(gLog, "[SIM] 预览定时器已启动");
+}
+
+- (void)tick:(id)timer {
+    if (gPreviewTick++ < 0) return;
+    id iv = ((id (*)(id, SEL))objc_msgSend)(timer, sel_registerName("userInfo"));
+    if (!iv) return;
+    CGImageRef img = RenderFrame(240, 320);
+    if (!img) return;
+    id ui = ((id (*)(id, SEL, CGImageRef, double, long))objc_msgSend)(
+        ((id (*)(id, SEL))objc_msgSend)(objc_getClass("UIImage"), sel_registerName("alloc")),
+        sel_registerName("initWithCGImage:scale:orientation:"), img, 1.0, 0);
+    ((void (*)(id, SEL, id))objc_msgSend)(iv, sel_registerName("setImage:"), ui);
+    CGImageRelease(img);
+}
+
+- (void)handleTap:(id)sender { os_log(gLog, "[SIM] 命中「拥有爱车」标签"); [self openPreview]; }
+- (void)handleButton:(id)sender {
+    if (gPreviewTimer) {
+        ((void (*)(id, SEL))objc_msgSend)(gPreviewTimer, sel_registerName("invalidate"));
+        gPreviewTimer = nil;
+        id root = RootVC();
+        if (root) ((void (*)(id, SEL, BOOL, id))objc_msgSend)(root,
+            sel_registerName("dismissViewControllerAnimated:completion:"), YES, nil);
+        os_log(gLog, "[SIM] 预览已关闭");
+        return;
+    }
+    os_log(gLog, "[SIM] 点击悬浮按钮");
+    [self openPreview];
+}
+
+@end
+
+static POSimTarget *gSimTarget = nil;
+static BOOL gLabelHooked = NO;
+
+static void InstallEntryPoint(void) {
+    if (gLabelHooked) return;
+    id root = RootVC();
+    if (!root) return;
+    id v = ((id (*)(id, SEL))objc_msgSend)(root, sel_registerName("view"));
+    id label = FindLabel(v, @"拥有爱车", 0);
+    if (!label) label = FindLabel(v, @"爱车", 0);
+    if (!label) return;
+
+    ((void (*)(id, SEL, BOOL))objc_msgSend)(label, sel_registerName("setUserInteractionEnabled:"), YES);
+    id gr = ((id (*)(id, SEL, id, SEL))objc_msgSend)(
+        ((id (*)(id, SEL))objc_msgSend)(objc_getClass("UITapGestureRecognizer"), sel_registerName("alloc")),
+        sel_registerName("initWithTarget:action:"), gSimTarget, sel_registerName("handleTap:"));
+    ((void (*)(id, SEL, id))objc_msgSend)(label, sel_registerName("addGestureRecognizer:"), gr);
+    gLabelHooked = YES;
+    os_log(gLog, "[SIM] ✅ 已在「拥有爱车」标签挂载点击");
+}
+
+static void InstallFloatingButton(void) {
+    id w = KeyWindow();
+    if (!w) return;
+    PORect b = ((PORect (*)(id, SEL))objc_msgSend)(w, sel_registerName("bounds"));
+    PORect f = { b.w - 116, b.h - 150, 104, 42 };
+    id btn = ((id (*)(id, SEL, PORect))objc_msgSend)(
+        ((id (*)(id, SEL))objc_msgSend)(objc_getClass("UIButton"), sel_registerName("alloc")),
+        sel_registerName("initWithFrame:"), f);
+    ((void (*)(id, SEL, id, long))objc_msgSend)(btn, sel_registerName("setTitle:forState:"), @"模拟投屏", 0);
+    id color = ((id (*)(id, SEL, double, double))objc_msgSend)(objc_getClass("UIColor"),
+        sel_registerName("colorWithWhite:alpha:"), 0.25, 0.9);
+    ((void (*)(id, SEL, id))objc_msgSend)(btn, sel_registerName("setBackgroundColor:"), color);
+    ((void (*)(id, SEL, id, SEL, long))objc_msgSend)(btn,
+        sel_registerName("addTarget:action:forControlEvents:"),
+        gSimTarget, sel_registerName("handleButton:"), 64);
+    ((void (*)(id, SEL, id))objc_msgSend)(w, sel_registerName("addSubview:"), btn);
+    os_log(gLog, "[SIM] 悬浮按钮已添加");
+}
+
 %ctor {
     gLog  = os_log_create("com.rev.projectionoverride", "general");
     gLock = [NSLock new];
     id o = [[NSUserDefaults standardUserDefaults] objectForKey:@"POOrientation"];
     int deg = o ? [o intValue] : 180;
     BOOL mir = [[NSUserDefaults standardUserDefaults] boolForKey:@"POMirror"];
-    os_log(gLog, "ProjectionOverride 1.1 已加载（朝向=%d° 镜像=%s）", deg, mir ? "是" : "否");
+    os_log(gLog, "ProjectionOverride 2.0 已加载（朝向=%d° 镜像=%s）", deg, mir ? "是" : "否");
+
+    gSimTarget = [POSimTarget new];
+    id noBtn = [[NSUserDefaults standardUserDefaults] objectForKey:@"POSimFloatingButton"];
+    BOOL wantBtn = noBtn ? [noBtn boolValue] : YES;
+
+    // 启动后持续扫描入口（首页可能异步渲染）
+    for (int i = 1; i <= 20; i++) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * 1.5 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            InstallEntryPoint();
+            if (wantBtn && i == 6) InstallFloatingButton();
+        });
+    }
 }
