@@ -145,6 +145,33 @@ static void LogBig(const char *tag, id inData, id key, id outData) {
 }
 
 // ===== 接口层 =====
+
+// ===== 解压转储：绕过加密，直接把明文 zip 捞出来 =====
+// 皮肤包流程：加密bin → 内存解密 → 写 tmp/xxx（此时已是合法 zip）→ SSZipArchive 解压
+// 我们在解压前把源文件复制到 Documents/POSkinDump/，于是无需任何密钥即可拿到明文包。
+static void DumpArchive(NSString *path, const char *how) {
+    if (!path || ![path isKindOfClass:[NSString class]]) return;
+    NSData *d = [NSData dataWithContentsOfFile:path];
+    if (!d.length) { Emit("[ZIP] 读取失败", "%s path=%s", how, path.UTF8String); return; }
+    const unsigned char *b = (const unsigned char *)d.bytes;
+    BOOL isZip = (d.length >= 4 && b[0]=='P' && b[1]=='K' && (b[2]==3||b[2]==5) && (b[3]==4||b[3]==6));
+    Emit("[ZIP] 解压源", "%s size=%lu isZip=%s path=%s", how,
+         (unsigned long)d.length, isZip ? "YES" : "NO", path.UTF8String);
+
+    NSArray *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    if (!docs.count) return;
+    NSString *dir = [docs[0] stringByAppendingPathComponent:@"POSkinDump"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                             withIntermediateDirectories:YES attributes:nil error:nil];
+    static int n = 0;
+    NSString *base = [path lastPathComponent];
+    NSString *name = [NSString stringWithFormat:@"%03d_%@.zip", ++n, base];
+    NSString *dst = [dir stringByAppendingPathComponent:name];
+    NSError *err = nil;
+    [[NSFileManager defaultManager] copyItemAtPath:path toPath:dst error:&err];
+    Emit("[ZIP] 已转储", "%s (%s)", dst.UTF8String, err ? err.localizedDescription.UTF8String : "ok");
+}
+
 %hook NSJSONSerialization
 + (id)JSONObjectWithData:(id)data options:(unsigned long)opt error:(id *)err {
     id r = %orig;
@@ -231,7 +258,43 @@ static void LogBig(const char *tag, id inData, id key, id outData) {
 
 %end
 
+
+// ===== SSZipArchive 解压入口（class + instance 两种形式都挂）=====
+%hook SSZipArchive
+
++ (BOOL)unzipFileAtPath:(id)path toDestination:(id)dest {
+    DumpArchive(path, "+unzip2");
+    return %orig;
+}
+- (BOOL)unzipFileAtPath:(id)path toDestination:(id)dest {
+    DumpArchive(path, "-unzip2");
+    return %orig;
+}
++ (BOOL)unzipFileAtPath:(id)path toDestination:(id)dest overwrite:(BOOL)ow password:(id)pwd error:(id *)err {
+    DumpArchive(path, "+unzip6");
+    return %orig;
+}
+- (BOOL)unzipFileAtPath:(id)path toDestination:(id)dest overwrite:(BOOL)ow password:(id)pwd error:(id *)err {
+    DumpArchive(path, "-unzip6");
+    return %orig;
+}
+
+%end
+
+// 兜底：任何以 PK 开头且 >50KB 的落盘数据都抄一份
+%hook NSData
+
+- (BOOL)writeToFile:(id)path atomically:(BOOL)atom {
+    if (self.length > 51200 && self.length < 20*1024*1024) {
+        const unsigned char *b = (const unsigned char *)self.bytes;
+        if (b && b[0]=='P' && b[1]=='K' && b[2]==3 && b[3]==4) DumpArchive((NSString *)path, "writeToFile");
+    }
+    return %orig;
+}
+
+%end
+
 %ctor {
     gLog = os_log_create("com.rev.themeprobe", "general");
-    os_log(gLog, "ThemeProbe 1.0 已加载（主题接口 + 皮肤解密 + 密钥派生）");
+    os_log(gLog, "ThemeProbe 1.1 已加载（主题接口 + 皮肤解密 + 密钥派生 + 解压转储）");
 }
