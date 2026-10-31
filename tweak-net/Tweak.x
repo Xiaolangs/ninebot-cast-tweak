@@ -19,9 +19,9 @@ static os_log_t gLog = NULL;
 
 #define NL_CHUNK       700      // 每段字符数（os_log 单条安全长度）
 #define NL_MAX_BYTES   (512*1024)
-#define NL_MAX_LINES   4000     // 分段后的总行数上限
-#define NL_RATE_PER_SEC 20.0    // 令牌桶速率（行/秒）
-#define NL_BURST       60.0     // 允许的突发额度
+#define NL_MAX_LINES   40000    // 分段后的总行数上限
+#define NL_RATE_PER_SEC 300.0   // 命中主题关键字后基本不限流
+#define NL_BURST       600.0    // 突发额度
 
 static int          gLines = 0;
 static double       gTokens = NL_BURST;
@@ -82,6 +82,39 @@ static void EmitFull(const char *tag, NSString *text) {
     gInHook = 0;
 }
 
+
+// ===== 关键字过滤：只有命中主题相关才输出 =====
+// 直接在原始字节上匹配 ASCII 关键字，不预先解码，开销极小
+static const char *kKeywords[] = {
+    "app-api/theme", "resourceCode", "resourceList", "dashSkin", "DashSkin",
+    "themeSkin", "ThemeSkin", "get-new-version", "batch-show-config",
+    "skinId", "skinName", "resourceName"
+};
+
+static BOOL BytesContain(const void *hay, size_t hlen, const char *needle) {
+    size_t nlen = strlen(needle);
+    if (hlen < nlen) return NO;
+    return memmem(hay, hlen, needle, nlen) != NULL;
+}
+
+static BOOL DataHasKeyword(NSData *d) {
+    if (![d isKindOfClass:[NSData class]]) return NO;
+    if (d.length < 8 || d.length > NL_MAX_BYTES) return NO;
+    if ([[NSUserDefaults standardUserDefaults] boolForKey:@"PONetLogAll"]) return YES;
+    for (size_t i = 0; i < sizeof(kKeywords)/sizeof(kKeywords[0]); i++) {
+        if (BytesContain(d.bytes, d.length, kKeywords[i])) return YES;
+    }
+    return NO;
+}
+
+static BOOL StringHasKeyword(NSString *s) {
+    if (!s.length) return NO;
+    if ([[NSUserDefaults standardUserDefaults] boolForKey:@"PONetLogAll"]) return YES;
+    if ([s containsString:@"app-api/theme"]) return YES;
+    if ([s containsString:@"theme"]) return YES;
+    return NO;
+}
+
 // 只在内容像 JSON 时才处理：API 载荷是 JSON，BLE 指令是二进制 → 天然避开热点
 static BOOL LooksJSON(NSData *d) {
     if (![d isKindOfClass:[NSData class]]) return NO;
@@ -105,13 +138,13 @@ static NSString *Plain(id data) {
 
 + (id)JSONObjectWithData:(id)data options:(unsigned long)opt error:(id *)err {
     id r = %orig;
-    if (LooksJSON(data)) EmitFull("[RESP]", Plain(data));
+    if (LooksJSON(data) && DataHasKeyword((NSData *)data)) EmitFull("[RESP]", Plain(data));
     return r;
 }
 
 + (id)dataWithJSONObject:(id)obj options:(unsigned long)opt error:(id *)err {
     id r = %orig;
-    if (LooksJSON(r)) EmitFull("[REQ]", Plain(r));
+    if (LooksJSON(r) && DataHasKeyword((NSData *)r)) EmitFull("[REQ]", Plain(r));
     return r;
 }
 
@@ -120,7 +153,7 @@ static NSString *Plain(id data) {
 %hook NSMutableURLRequest
 
 - (void)setHTTPBody:(id)body {
-    if (LooksJSON(body)) EmitFull("[REQ]", Plain(body));
+    if (LooksJSON(body) && DataHasKeyword((NSData *)body)) EmitFull("[REQ]", Plain(body));
     %orig;
 }
 
@@ -129,19 +162,19 @@ static NSString *Plain(id data) {
 %hook JCOREDataSecurity
 
 + (id)encrypt:(id)plain aesKey:(id)key {
-    if (LooksJSON(plain)) EmitFull("[REQ*]", Plain(plain));
+    if (LooksJSON(plain) && DataHasKeyword((NSData *)plain)) EmitFull("[REQ*]", Plain(plain));
     return %orig;
 }
 - (id)encrypt:(id)plain aesKey:(id)key {
-    if (LooksJSON(plain)) EmitFull("[REQ*]", Plain(plain));
+    if (LooksJSON(plain) && DataHasKeyword((NSData *)plain)) EmitFull("[REQ*]", Plain(plain));
     return %orig;
 }
 + (id)AES256EncryptData:(id)plain withKey:(id)key {
-    if (LooksJSON(plain)) EmitFull("[REQ*]", Plain(plain));
+    if (LooksJSON(plain) && DataHasKeyword((NSData *)plain)) EmitFull("[REQ*]", Plain(plain));
     return %orig;
 }
 - (id)AES256EncryptData:(id)plain withKey:(id)key {
-    if (LooksJSON(plain)) EmitFull("[REQ*]", Plain(plain));
+    if (LooksJSON(plain) && DataHasKeyword((NSData *)plain)) EmitFull("[REQ*]", Plain(plain));
     return %orig;
 }
 
@@ -152,14 +185,14 @@ static NSString *Plain(id data) {
 - (id)dataTaskWithRequest:(id)req {
     id url = ((id (*)(id, SEL))objc_msgSend)(req, NSSelectorFromString(@"URL"));
     id s = url ? ((id (*)(id, SEL))objc_msgSend)(url, NSSelectorFromString(@"absoluteString")) : nil;
-    if ([s isKindOfClass:[NSString class]]) EmitFull("[URL]", s);
+    if ([s isKindOfClass:[NSString class]] && StringHasKeyword(s)) EmitFull("[URL]", s);
     return %orig;
 }
 
 - (id)downloadTaskWithRequest:(id)req {
     id url = ((id (*)(id, SEL))objc_msgSend)(req, NSSelectorFromString(@"URL"));
     id s = url ? ((id (*)(id, SEL))objc_msgSend)(url, NSSelectorFromString(@"absoluteString")) : nil;
-    if ([s isKindOfClass:[NSString class]]) EmitFull("[DL]", s);
+    if ([s isKindOfClass:[NSString class]] && ([s containsString:@".zip"] || StringHasKeyword(s))) EmitFull("[DL]", s);
     return %orig;
 }
 
@@ -167,5 +200,5 @@ static NSString *Plain(id data) {
 
 %ctor {
     gLog = os_log_create("com.rev.netplainlog", "general");
-    os_log(gLog, "NetPlainLog 1.2 已加载（完整明文，分段=%d字符，上限=%d行）", NL_CHUNK, NL_MAX_LINES);
+    os_log(gLog, "NetPlainLog 1.3 已加载（仅 app-api/theme 相关，完整明文，分段=%d字符，上限=%d行）", NL_CHUNK, NL_MAX_LINES);
 }
