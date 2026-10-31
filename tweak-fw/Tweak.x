@@ -320,13 +320,27 @@ static NSString *RewriteOtaBody(NSString *body) {
     return r;
 }
 + (id)encrypt:(id)plain aesKey:(id)key {
-    Emit("[KEY] encrypt", "key=%s plainLen=%lu", Describe(key, 64).UTF8String,
+    Emit("[KEY] encrypt", "keyLen=%lu plainLen=%lu", (unsigned long)([key isKindOfClass:[NSData class]] ? ((NSData *)key).length : 0),
          (unsigned long)([plain isKindOfClass:[NSData class]] ? ((NSData *)plain).length : 0));
     return %orig;
 }
 - (id)encrypt:(id)plain aesKey:(id)key {
-    Emit("[KEY] encrypt(-)", "key=%s plainLen=%lu", Describe(key, 64).UTF8String,
+    Emit("[KEY] encrypt(-)", "keyLen=%lu plainLen=%lu", (unsigned long)([key isKindOfClass:[NSData class]] ? ((NSData *)key).length : 0),
          (unsigned long)([plain isKindOfClass:[NSData class]] ? ((NSData *)plain).length : 0));
+    // 实例形式：直接就地改写
+    if ([plain isKindOfClass:[NSData class]]) {
+        NSString *txt = [[NSString alloc] initWithData:(NSData *)plain encoding:NSUTF8StringEncoding];
+        if (txt.length && [txt containsString:@"part_type"]) {
+            EmitFull("[OTA-PLAIN]", txt);
+            NSString *mod = RewriteOtaBody(txt);
+            if (mod) {
+                NSData *nd = [mod dataUsingEncoding:NSUTF8StringEncoding];
+                Emit("[OTA] 加密前改写", "len %lu -> %lu",
+                     (unsigned long)((NSData *)plain).length, (unsigned long)nd.length);
+                return %orig(nd, key);
+            }
+        }
+    }
     return %orig;
 }
 + (id)aes256DecryptData:(id)d withKey:(id)k { id r = %orig; LogBig("+aes256", d, k, r); return r; }
@@ -523,6 +537,6 @@ static void DumpStack(const char *why, NSString *detail) {
 
 %ctor {
     gLog = os_log_create("com.rev.themeprobe", "general");
-    os_log(gLog, "FirmwareProbe 1.1 已加载（OTA 取证 + 版本伪造）");
+    os_log(gLog, "FirmwareProbe 1.2 已加载（OTA 明文取证 + 加密前改写）");
     os_log(gLog, "[BEAT] 心跳：%{public}s", "启动完成，等待固件/OTA 流程");
 }
