@@ -535,6 +535,39 @@ static void DumpStack(const char *why, NSString *detail) {
 
 %end
 
+
+// 底层加密入口兜底：不同请求可能走不同封装，这里按明文内容过滤后改写
+%hook JCOREDataSecurity
+
++ (id)aes256EncryptData:(id)plain withKey:(id)key {
+    if ([plain isKindOfClass:[NSData class]]) {
+        NSString *t = [[NSString alloc] initWithData:(NSData *)plain encoding:NSUTF8StringEncoding];
+        if (t.length && [t containsString:@"part_type"]) {
+            EmitFull("[OTA-PLAIN]", t);
+            NSString *m = RewriteOtaBody(t);
+            if (m) { Emit("[OTA] aes256 加密前改写", "%lu -> %lu",
+                          (unsigned long)((NSData *)plain).length, (unsigned long)m.length);
+                return %orig([m dataUsingEncoding:NSUTF8StringEncoding], key); }
+        }
+    }
+    return %orig;
+}
+- (id)aes256EncryptData:(id)plain withKey:(id)key {
+    if ([plain isKindOfClass:[NSData class]]) {
+        NSString *t = [[NSString alloc] initWithData:(NSData *)plain encoding:NSUTF8StringEncoding];
+        if (t.length && [t containsString:@"part_type"]) {
+            EmitFull("[OTA-PLAIN]", t);
+            NSString *m = RewriteOtaBody(t);
+            if (m) { Emit("[OTA] aes256(-) 加密前改写", "%lu -> %lu",
+                          (unsigned long)((NSData *)plain).length, (unsigned long)m.length);
+                return %orig([m dataUsingEncoding:NSUTF8StringEncoding], key); }
+        }
+    }
+    return %orig;
+}
+
+%end
+
 %ctor {
     gLog = os_log_create("com.rev.themeprobe", "general");
     os_log(gLog, "FirmwareProbe 1.2 已加载（OTA 明文取证 + 加密前改写）");
