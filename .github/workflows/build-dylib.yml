@@ -6,6 +6,7 @@ on:
     paths:
       - 'tweak-theos/**'
       - 'tweak/**'
+      - 'tweak-net/**'
       - '.github/workflows/build-dylib.yml'
   pull_request:
   workflow_dispatch:
