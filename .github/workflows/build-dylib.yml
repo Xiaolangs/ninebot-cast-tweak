@@ -7,6 +7,7 @@ on:
       - 'tweak-theos/**'
       - 'tweak/**'
       - 'tweak-net/**'
+      - 'tweak-key/**'
       - '.github/workflows/build-dylib.yml'
   pull_request:
   workflow_dispatch:
@@ -163,4 +164,42 @@ jobs:
         with:
           name: NetPlainLog
           path: out/NetPlainLog.dylib
+          if-no-files-found: error
+
+  build-key:
+    name: KeyProbe build
+    runs-on: macos-14
+    env:
+      THEOS: ${{ github.workspace }}/theos
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Theos
+        run: |
+          set -euo pipefail
+          if [ ! -f "$THEOS/makefiles/common.mk" ] || [ ! -f "$THEOS/bin/logos.pl" ]; then
+            rm -rf "$THEOS"
+            git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
+          fi
+
+      - name: Install ldid
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install ldid || true
+
+      - name: Build KeyProbe
+        working-directory: tweak-key
+        run: |
+          set -euo pipefail
+          make
+          DYLIB=$(find .theos -name 'KeyProbe.dylib' | head -1)
+          test -n "$DYLIB"
+          nm -gU "$DYLIB" | grep -q _MSHookMessageEx
+          file "$DYLIB"
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp "$DYLIB" "$GITHUB_WORKSPACE/out/KeyProbe.dylib"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: KeyProbe
+          path: out/KeyProbe.dylib
           if-no-files-found: error
