@@ -1,11 +1,9 @@
-// KeyBodyProbe 1.1 — 只钩两个「已验证不崩」的点，拿到 密钥 + 请求体
+// KeyBodyProbe 1.2 — 线程局部配对 + 全量密钥清单
 //
-//   1) +/-[JCOREDataSecurity rsaEncrypt:publicKey:]  ★ 入参就是 AES 密钥（k=RSA(key)）
-//      以及 encryptKeyForHttp: 作为参考
-//   2) -[NSMutableURLRequest setHTTPBody:]         每请求一次，body 就是 wire JSON
-//
-// 不碰 gzip: / aesEncryptData: / aes256EncryptData: —— 那些是前几次闪退的来源。
-// 拿到两者后在电脑上离线解：d --AES(key)--> wrapper --b64--> 内层业务 JSON。
+// 问题：之前用全局变量存密钥，body 落定时取到的是别的请求/别的线程的值，配对失败。
+// 现在：① 线程局部 __thread 保存本线程最近一次密钥；② 同时维护全量清单，
+//       body 落定时把「本线程密钥」和「所有见过的密钥」一起打印。
+// 钩子仍只有三个低频点：rsaEncrypt:publicKey: / encryptKeyForHttp: / setHTTPBody:
 
 #import <Foundation/Foundation.h>
 #import <os/log.h>
@@ -13,32 +11,19 @@
 #import <substrate.h>
 
 static os_log_t gLog = NULL;
-static NSString *gKey = nil;        // 最近一次生成的密钥
+static __thread char tlKey[128] = {0};          // 本线程最近一次密钥（C 数组，避免 ARC 线程局部限制）
+static NSMutableArray<NSString *> *gAll = nil;   // 全量清单
 static volatile int gIn = 0;
 static int gLines = 0;
 
 #define KB_CHUNK 700
 #define KB_MAX_LINES 400
+#define KB_MAX_KEYS 12
 
-static void Emit(const char *tag, NSString *s) {
-    if (!s.length || gIn || gLines > KB_MAX_LINES) return;
-    gIn = 1;
-    NSUInteger total = (s.length + KB_CHUNK - 1) / KB_CHUNK;
-    for (NSUInteger i = 0; i < total && gLines <= KB_MAX_LINES; i++) {
-        NSUInteger loc = i * KB_CHUNK;
-        NSUInteger len = MIN((NSUInteger)KB_CHUNK, s.length - loc);
-        gLines++;
-        os_log(gLog, "%{public}s[%lu/%lu] %{public}s", tag,
-               (unsigned long)(i + 1), (unsigned long)total,
-               [s substringWithRange:NSMakeRange(loc, len)].UTF8String);
-    }
-    gIn = 0;
-}
-
-static NSString *KeyStr(id k) {
-    if ([k isKindOfClass:[NSString class]]) return (NSString *)k;
-    if ([k isKindOfClass:[NSData class]]) {
-        NSData *d = (NSData *)k;
+static NSString *Hex(id o) {
+    if ([o isKindOfClass:[NSString class]]) return (NSString *)o;
+    if ([o isKindOfClass:[NSData class]]) {
+        NSData *d = (NSData *)o;
         NSMutableString *s = [NSMutableString stringWithCapacity:d.length * 2];
         const unsigned char *b = (const unsigned char *)d.bytes;
         for (NSUInteger i = 0; i < d.length; i++) [s appendFormat:@"%02x", b[i]];
@@ -47,38 +32,36 @@ static NSString *KeyStr(id k) {
     return nil;
 }
 
-static void RememberKey(id key) {
-    NSString *s = KeyStr(key);
-    if (!s.length) return;
-    gKey = [s copy];
-    os_log(gLog, "[KEY ] len=%lu value=%{public}s",
-           (unsigned long)s.length, s.UTF8String);
+static void Remember(id key) {
+    NSString *h = Hex(key);
+    if (!h.length) return;
+    strncpy(tlKey, h.UTF8String ?: "", sizeof(tlKey) - 1);
+    tlKey[sizeof(tlKey) - 1] = 0;
+    if (gAll.count < KB_MAX_KEYS && ![gAll containsObject:h]) [gAll addObject:h];
+    os_log(gLog, "[KEY ] %{public}s  rawLen=%lu", h.UTF8String,
+           (unsigned long)([key isKindOfClass:[NSData class]] ? ((NSData *)key).length
+                          : ([key isKindOfClass:[NSString class]] ? ((NSString *)key).length : 0)));
+}
+
+static void Emit(const char *tag, NSString *s) {
+    if (!s.length || gIn || gLines > KB_MAX_LINES) return;
+    gIn = 1;
+    NSUInteger total = (s.length + KB_CHUNK - 1) / KB_CHUNK;
+    for (NSUInteger i = 0; i < total && gLines <= KB_MAX_LINES; i++) {
+        NSUInteger loc = i * KB_CHUNK, len = MIN((NSUInteger)KB_CHUNK, s.length - loc);
+        gLines++;
+        os_log(gLog, "%{public}s[%lu/%lu] %{public}s", tag, (unsigned long)(i+1),
+               (unsigned long)total, [s substringWithRange:NSMakeRange(loc, len)].UTF8String);
+    }
+    gIn = 0;
 }
 
 %hook JCOREDataSecurity
 
-// k = RSA(aesKey) → 这里的入参 data 就是本次请求真正的 AES 密钥
-+ (id)rsaEncrypt:(id)data publicKey:(id)pk {
-    id r = %orig;
-    RememberKey(data);
-    return r;
-}
-- (id)rsaEncrypt:(id)data publicKey:(id)pk {
-    id r = %orig;
-    RememberKey(data);
-    return r;
-}
-
-+ (id)encryptKeyForHttp:(unsigned int *)out {
-    id r = %orig;
-    RememberKey(r);
-    return r;
-}
-- (id)encryptKeyForHttp:(unsigned int *)out {
-    id r = %orig;
-    RememberKey(r);
-    return r;
-}
++ (id)rsaEncrypt:(id)data publicKey:(id)pk { id r = %orig; Remember(data); return r; }
+- (id)rsaEncrypt:(id)data publicKey:(id)pk { id r = %orig; Remember(data); return r; }
++ (id)encryptKeyForHttp:(unsigned int *)out { id r = %orig; Remember(r); return r; }
+- (id)encryptKeyForHttp:(unsigned int *)out { id r = %orig; Remember(r); return r; }
 
 %end
 
@@ -91,17 +74,17 @@ static void RememberKey(id key) {
     NSData *d = (NSData *)body;
     if (d.length < 200 || d.length > 200000) return;
     const unsigned char *b = (const unsigned char *)d.bytes;
-    if (b[0] != '{') return;                      // wire JSON 以 { 开头；二进制请求直接跳过
+    if (b[0] != '{') return;
     NSString *text = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
-    if (!text.length) return;
-    if (![text containsString:@"\"d\""]) return;  // 只认带 d 字段的加密请求
+    if (!text.length || ![text containsString:@"\"d\""]) return;
 
     id url = ((id (*)(id, SEL))objc_msgSend)(self, NSSelectorFromString(@"URL"));
     id us  = url ? ((id (*)(id, SEL))objc_msgSend)(url, NSSelectorFromString(@"absoluteString")) : nil;
-    os_log(gLog, "[BODY] url=%{public}s len=%lu key=%{public}s",
+    os_log(gLog, "[BODY] url=%{public}s len=%lu tlKey=%{public}s",
            ([us isKindOfClass:[NSString class]] ? (NSString *)us : @"?").UTF8String,
-           (unsigned long)d.length,
-           (gKey.length ? gKey.UTF8String : "(尚未捕获)"));
+           (unsigned long)d.length, (tlKey[0] ? tlKey : "(无)"));
+    os_log(gLog, "[BODY] 全量密钥清单(%lu): %{public}s",
+           (unsigned long)gAll.count, [gAll componentsJoinedByString:@","].UTF8String);
     Emit("[BODY]", text);
 }
 
@@ -109,5 +92,6 @@ static void RememberKey(id key) {
 
 %ctor {
     gLog = os_log_create("com.rev.keybody", "general");
-    os_log(gLog, "KeyBodyProbe 1.1 已加载（RSA 入参=真实AES密钥 + wire 请求体）");
+    gAll = [NSMutableArray array];
+    os_log(gLog, "KeyBodyProbe 1.2 已加载（线程局部配对 + 全量密钥）");
 }
