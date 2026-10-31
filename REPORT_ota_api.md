@@ -225,3 +225,66 @@ python3 scripts/ota_wire.py \
 - `NSUserDefaults` + 沙盒文件只读扫描 → 未命中（缓存只在内存）
 
 **零风险可行解**：App 内 `Documents/NetLog/` 若存在，可直接读；或等有车时用 BLE 读真实值。
+
+---
+
+# 附录 A：真实内层明文（安卓客户端实测解密，2026-10-31）
+
+```json
+{
+  "uid": "541117341",
+  "wnumber": "3ZDCK2619J3650",
+  "env_type": "1",
+  "download_type": "2",
+  "parts": [ {"part_type":"MCU"}, {"part_type":"BFG"}, ... {"part_type":"TFT"}, ... ],
+  "download": "0",
+  "access_token": "<JWT>",
+  "sys_language": "zh-hans-cn",
+  "client_ver": "610124167",
+  "device_id": "<32位hex>",
+  "regionx": "bj",
+  "language": "zh",
+  "ostype": "and",
+  "lang": "zh",
+  "platform_ver": "14 Google_Pixel 5",
+  "platform": "android",
+  "login_country": "CN",
+  "serviceTime": 1793435504671,
+  "nonce": "0b02EDD3D247FAD0725D4330C90EDB34",
+  "checkcode": "D6D4A4B61924AEF588B9FA349548769F"
+}
+```
+
+## 关键修正（相对第 2 节）
+
+| 项 | 之前认为 | 实际 |
+|---|---|---|
+| `parts[]` 内容 | 每个都带 version + pn | **只带 `part_type`**；版本未知时 version/pn 字段整体不出现 |
+| 内层是否有 access_token | 无 | **有**，放在 body 里（这是 4104 的根因） |
+| 额外字段 | 无 | `download` / `serviceTime` / `nonce` / `checkcode` |
+| 公共参数 | 猜测 | `sys_language, client_ver, device_id, regionx, language, ostype, lang, platform_ver, platform, login_country` |
+
+`checkcode = MD5(不含 checkcode 的紧凑 JSON).upper()`
+`nonce` = 32 位十六进制，首字节小写、其余大写
+
+## 实测结果（全部 code=1 success）
+
+| 改动 | 结果 |
+|---|---|
+| `parts[TFT].version = "0"` | `code=1`，`parts_version: []` |
+| `version = 0`（数字） | 同上 |
+| `version = "1" / "999" / "65535" / "0000"` | 同上 |
+| 全部 18 个部件都上报 `version` | 同上 |
+| `download_type = 0 / 1 / 3`、`env_type = 2`、`download = 0/1` | 同上 |
+| `version = "1.0.0"`（非纯数字） | `code=500001` 报错 |
+
+**结论：请求已完全打通（HTTP 200 + 解密成功 + `code=1`），但 `parts_version` 恒为空。
+服务端判定"是否有更新"不依据客户端上报的 version，而是依据自身记录的车辆部件信息。
+该车当前确实没有可用固件更新（与 App 显示"已是最新"一致）。**
+
+响应的完整字段：
+```json
+{"parts_version":[], "show_kart_tip":false, "special_version_status":false,
+ "forced_status":false, "forced_content":"", "blue_ota_support":1}
+```
+有更新时，新版本信息与下载地址应出现在 `parts_version[]` 中。
