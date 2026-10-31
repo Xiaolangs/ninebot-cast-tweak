@@ -592,6 +592,26 @@ static void DumpStack(const char *why, NSString *detail) {
 %end
 
 
+
+// ===== JCore sis 层：3 参数 AES（带 IV）=====
+// 这是 OTA 请求体真正的加密点：gzip(json) → aes256EncryptData:withKey:iv:
+static void DumpSis(const char *tag, id data, id key, id iv, id out) {
+    NSString *k = Describe(key, 80);
+    NSString *v = Describe(iv, 40);
+    NSString *din = Magic(data), *dout = Magic(out);
+    Emit("[SIS] 加密/解密", "%s iv=%s key=%s", tag, v.UTF8String, k.UTF8String);
+    Emit("[SIS]   in ", "%s", din.UTF8String);
+    Emit("[SIS]   out", "%s", dout.UTF8String);
+    // 输入若是 gzip，尝试解出明文
+    if ([data isKindOfClass:[NSData class]]) {
+        NSData *d = (NSData *)data;
+        const unsigned char *b = (const unsigned char *)d.bytes;
+        if (d.length > 2 && b[0] == 0x1f && b[1] == 0x8b) {
+            Emit("[SIS] 输入是 gzip", "尝试解压…");
+        }
+    }
+}
+
 %hook _TtC9NBEncrypt11EncryptUtil
 
 + (id)encryptForNewWithParams:(id)params isPassport:(BOOL)passport {
@@ -624,6 +644,32 @@ static void DumpStack(const char *why, NSString *detail) {
 - (id)decryptForNewWithStr:(id)str {
     id r = %orig;
     LogPair("-decryptForNewWithStr", str, r);
+    return r;
+}
+
+%end
+
+
+%hook JCOREDataSecurity
+
++ (id)aes256EncryptData:(id)d withKey:(id)k iv:(id)iv {
+    id r = %orig;
+    DumpSis("+aes256Encrypt:iv:", d, k, iv, r);
+    return r;
+}
+- (id)aes256EncryptData:(id)d withKey:(id)k iv:(id)iv {
+    id r = %orig;
+    DumpSis("-aes256Encrypt:iv:", d, k, iv, r);
+    return r;
+}
++ (id)aes256DecryptData:(id)d withKey:(id)k iv:(id)iv {
+    id r = %orig;
+    DumpSis("+aes256Decrypt:iv:", d, k, iv, r);
+    return r;
+}
+- (id)aes256DecryptData:(id)d withKey:(id)k iv:(id)iv {
+    id r = %orig;
+    DumpSis("-aes256Decrypt:iv:", d, k, iv, r);
     return r;
 }
 
