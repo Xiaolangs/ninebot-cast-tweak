@@ -32,6 +32,28 @@ static BOOL OverrideEnabled(void) {
     return v ? [v boolValue] : YES;          // 置 NO 即恢复原生画面
 }
 
+
+// ---------------- 朝向 ----------------
+// 基准：已做垂直翻转使坐标系为左上原点（保证文字正向）
+// POOrientation: 0 或 180（默认 180，实测车机为 180 旋转）；POMirror: 水平镜像
+static void ApplyOrientation(CGContextRef ctx, size_t w, size_t h) {
+    CGContextTranslateCTM(ctx, 0, (CGFloat)h);
+    CGContextScaleCTM(ctx, 1, -1);                      // 基准翻转
+
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    id o = [d objectForKey:@"POOrientation"];
+    int deg = o ? [o intValue] : 180;                   // 默认 180
+
+    if (deg == 180) {
+        CGContextTranslateCTM(ctx, (CGFloat)w, (CGFloat)h);
+        CGContextScaleCTM(ctx, -1, -1);                 // 绕中心旋转 180
+    }
+    if ([d boolForKey:@"POMirror"]) {
+        CGContextTranslateCTM(ctx, (CGFloat)w, 0);
+        CGContextScaleCTM(ctx, -1, 1);                  // 水平镜像
+    }
+}
+
 // ---------------- 你的画面 ----------------
 static CGImageRef RenderFrame(size_t w, size_t h) {
     if (w == 0 || h == 0) return NULL;
@@ -41,8 +63,7 @@ static CGImageRef RenderFrame(size_t w, size_t h) {
     CGColorSpaceRelease(cs);
     if (!ctx) return NULL;
 
-    CGContextTranslateCTM(ctx, 0, (CGFloat)h);
-    CGContextScaleCTM(ctx, 1, -1);
+    ApplyOrientation(ctx, w, h);
 
     CGContextSetRGBFillColor(ctx, 0.05, 0.06, 0.09, 1.0);
     CGContextFillRect(ctx, CGRectMake(0, 0, w, h));
@@ -177,5 +198,8 @@ static void NoteFrame(size_t w, size_t h) {
 %ctor {
     gLog  = os_log_create("com.rev.projectionoverride", "general");
     gLock = [NSLock new];
-    os_log(gLog, "ProjectionOverride 1.0 已加载（投屏画面替换）");
+    id o = [[NSUserDefaults standardUserDefaults] objectForKey:@"POOrientation"];
+    int deg = o ? [o intValue] : 180;
+    BOOL mir = [[NSUserDefaults standardUserDefaults] boolForKey:@"POMirror"];
+    os_log(gLog, "ProjectionOverride 1.1 已加载（朝向=%d° 镜像=%s）", deg, mir ? "是" : "否");
 }
