@@ -8,6 +8,7 @@ on:
       - 'tweak/**'
       - 'tweak-net/**'
       - 'tweak-key/**'
+      - 'tweak-theme/**'
       - '.github/workflows/build-dylib.yml'
   pull_request:
   workflow_dispatch:
@@ -202,4 +203,40 @@ jobs:
         with:
           name: KeyProbe
           path: out/KeyProbe.dylib
+          if-no-files-found: error
+
+  build-theme:
+    name: ThemeProbe build
+    runs-on: macos-14
+    env:
+      THEOS: ${{ github.workspace }}/theos
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Theos
+        run: |
+          set -euo pipefail
+          if [ ! -f "$THEOS/makefiles/common.mk" ] || [ ! -f "$THEOS/bin/logos.pl" ]; then
+            rm -rf "$THEOS"; git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
+          fi
+
+      - name: Install ldid
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install ldid || true
+
+      - name: Build ThemeProbe
+        working-directory: tweak-theme
+        run: |
+          set -euo pipefail
+          make
+          DYLIB=$(find .theos -name 'ThemeProbe.dylib' | head -1)
+          test -n "$DYLIB"
+          nm -gU "$DYLIB" | grep -q _MSHookMessageEx
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp "$DYLIB" "$GITHUB_WORKSPACE/out/ThemeProbe.dylib"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ThemeProbe
+          path: out/ThemeProbe.dylib
           if-no-files-found: error
