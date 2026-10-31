@@ -37,6 +37,17 @@ static void Emit(const char *tag, NSString *text) {
     gInHook = 0;
 }
 
+
+// 只在内容像 JSON 时才打印：API 载荷是 JSON，BLE 指令是二进制 → 天然过滤热点
+static BOOL LooksJSON(NSData *d) {
+    if (![d isKindOfClass:[NSData class]] || d.length < 8 || d.length > PO_MAX_BYTES) return NO;
+    const unsigned char *b = (const unsigned char *)d.bytes;
+    NSUInteger i = 0;
+    while (i < d.length && (b[i] == ' ' || b[i] == '\n' || b[i] == '\r' || b[i] == '\t')) i++;
+    if (i >= d.length) return NO;
+    return (b[i] == '{' || b[i] == '[');
+}
+
 static NSString *Plain(id data) {
     if (![data isKindOfClass:[NSData class]]) return nil;
     NSData *d = (NSData *)data;
@@ -83,7 +94,40 @@ static NSString *Plain(id data) {
 
 %end
 
+
+// 所有请求体最终都会经过 setHTTPBody:（不论 JSONEncoder / 表单 / 加密后）
+%hook NSMutableURLRequest
+
+- (void)setHTTPBody:(id)body {
+    if (LooksJSON(body)) Emit("[REQ] ", Plain(body));
+    %orig;
+}
+
+%end
+
+// 若请求体在 setHTTPBody 前已被加密，则在此处打印「加密的输入」= 明文
+%hook JCOREDataSecurity
+
++ (id)encrypt:(id)plain aesKey:(id)key {
+    if (LooksJSON(plain)) Emit("[REQ*]", Plain(plain));
+    return %orig;
+}
+- (id)encrypt:(id)plain aesKey:(id)key {
+    if (LooksJSON(plain)) Emit("[REQ*]", Plain(plain));
+    return %orig;
+}
++ (id)AES256EncryptData:(id)plain withKey:(id)key {
+    if (LooksJSON(plain)) Emit("[REQ*]", Plain(plain));
+    return %orig;
+}
+- (id)AES256EncryptData:(id)plain withKey:(id)key {
+    if (LooksJSON(plain)) Emit("[REQ*]", Plain(plain));
+    return %orig;
+}
+
+%end
+
 %ctor {
     gLog = os_log_create("com.rev.netplainlog", "general");
-    os_log(gLog, "NetPlainLog 1.0 已加载（接口明文打印，上限 %d 条）", PO_MAX_LINES);
+    os_log(gLog, "NetPlainLog 1.1 已加载（接口明文打印，上限 %d 条）", PO_MAX_LINES);
 }
