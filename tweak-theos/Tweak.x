@@ -230,6 +230,54 @@ static void NoteFrame(size_t w, size_t h) {
 %end
 
 
+
+// ================= 网络/解密 明文打印（诊断）=================
+static BOOL gNetLog = YES;
+static int  gJsonLogCount = 0;
+static int  gUrlLogCount  = 0;
+
+// 把 id（NSData/NSString）转成可读片段
+static NSString *Describe(id obj, NSUInteger maxLen) {
+    if (!obj) return @"(nil)";
+    if ([obj isKindOfClass:[NSData class]]) {
+        NSData *d = (NSData *)obj;
+        NSString *utf8 = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+        if (utf8 && utf8.length > 0) {
+            NSString *t = utf8.length > maxLen ? [utf8 substringToIndex:maxLen] : utf8;
+            return [NSString stringWithFormat:@"(%luB utf8) %@%@", (unsigned long)d.length, t,
+                    utf8.length > maxLen ? @"…" : @""];
+        }
+        NSData *head = d.length > 48 ? [d subdataWithRange:NSMakeRange(0, 48)] : d;
+        return [NSString stringWithFormat:@"(%luB b64) %@%@", (unsigned long)d.length,
+                [head base64EncodedStringWithOptions:0], d.length > 48 ? @"…" : @""];
+    }
+    if ([obj isKindOfClass:[NSString class]]) {
+        NSString *t = (NSString *)obj;
+        return t.length > maxLen ? [[t substringToIndex:maxLen] stringByAppendingString:@"…"] : t;
+    }
+    return [obj description];
+}
+
+// URL 是否值得打（默认只打主题/资源/zip 相关，PONetLogAll=YES 打全部）
+static BOOL UrlInteresting(NSString *u) {
+    if (!u) return NO;
+    if ([[NSUserDefaults standardUserDefaults] boolForKey:@"PONetLogAll"]) return YES;
+    NSString *low = u.lowercaseString;
+    for (NSString *k in @[@"theme", @"resource", @"skin", @"dashskin", @"upload", @".zip", @"get-new-version"]) {
+        if ([low containsString:k]) return YES;
+    }
+    return NO;
+}
+
+static void LogURL(NSString *u, const char *how) {
+    if (!gNetLog || !u || gUrlLogCount > 200) return;
+    if (!UrlInteresting(u)) return;
+    gUrlLogCount++;
+    BOOL hasSign = [u.lowercaseString containsString:@"nbchecksignv1"];
+    os_log(gLog, "[URL] %{public}s sign=%{public}s\n%{public}s",
+           how, hasSign ? "YES" : "NO", u.UTF8String);
+}
+
 // ================= 模拟投屏（本地全屏预览）=================
 typedef struct { double x, y, w, h; } PORect;
 typedef struct { double a, b, c, d, tx, ty; } POAffine;
@@ -405,13 +453,106 @@ static void InstallFloatingButton(void) {
     os_log(gLog, "[SIM] 悬浮按钮已添加");
 }
 
+
+// ================= 网络/解密 hook =================
+%hook NSURLSession
+
+- (id)dataTaskWithURL:(id)url {
+    LogURL(((id (*)(id, SEL))objc_msgSend)(url, sel_registerName("absoluteString")), "dataTaskWithURL");
+    return %orig;
+}
+- (id)dataTaskWithRequest:(id)req {
+    LogURL(((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)(req, sel_registerName("URL")), sel_registerName("absoluteString")), "dataTaskWithRequest");
+    return %orig;
+}
+- (id)downloadTaskWithURL:(id)url {
+    LogURL(((id (*)(id, SEL))objc_msgSend)(url, sel_registerName("absoluteString")), "downloadTaskWithURL");
+    return %orig;
+}
+- (id)downloadTaskWithRequest:(id)req {
+    LogURL(((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)(req, sel_registerName("URL")), sel_registerName("absoluteString")), "downloadTaskWithRequest");
+    return %orig;
+}
+
+%end
+
+// 解密层：JCOREDataSecurity（+ / - 两种形式都挂）
+%hook JCOREDataSecurity
+
++ (id)AES256DecryptData:(id)data withKey:(id)key {
+    id r = %orig;
+    if (gNetLog && gJsonLogCount < 400) {
+        gJsonLogCount++;
+        os_log(gLog, "[DEC] +AES256DecryptData key=%{public}s\n  in =%{public}s\n  out=%{public}s",
+               Describe(key, 64).UTF8String, Describe(data, 500).UTF8String, Describe(r, 900).UTF8String);
+    }
+    return r;
+}
+- (id)AES256DecryptData:(id)data withKey:(id)key {
+    id r = %orig;
+    if (gNetLog && gJsonLogCount < 400) {
+        gJsonLogCount++;
+        os_log(gLog, "[DEC] -AES256DecryptData key=%{public}s\n  in =%{public}s\n  out=%{public}s",
+               Describe(key, 64).UTF8String, Describe(data, 500).UTF8String, Describe(r, 900).UTF8String);
+    }
+    return r;
+}
++ (id)decrypt:(id)cipher aesKey:(id)key {
+    id r = %orig;
+    if (gNetLog && gJsonLogCount < 400) {
+        gJsonLogCount++;
+        os_log(gLog, "[DEC] +decrypt:aesKey: key=%{public}s\n  in =%{public}s\n  out=%{public}s",
+               Describe(key, 64).UTF8String, Describe(cipher, 500).UTF8String, Describe(r, 900).UTF8String);
+    }
+    return r;
+}
+- (id)decrypt:(id)cipher aesKey:(id)key {
+    id r = %orig;
+    if (gNetLog && gJsonLogCount < 400) {
+        gJsonLogCount++;
+        os_log(gLog, "[DEC] -decrypt:aesKey: key=%{public}s\n  in =%{public}s\n  out=%{public}s",
+               Describe(key, 64).UTF8String, Describe(cipher, 500).UTF8String, Describe(r, 900).UTF8String);
+    }
+    return r;
+}
+
+%end
+
+// JSON 层：解密后的明文最终会到这里，双向打印
+%hook NSJSONSerialization
+
++ (id)JSONObjectWithData:(id)data options:(unsigned long)opt error:(id *)err {
+    if (gNetLog && gJsonLogCount < 400 && [data isKindOfClass:[NSData class]]
+        && ((NSData *)data).length > 40) {
+        NSString *txt = Describe(data, 900);
+        if ([txt containsString:@"{"] || [txt containsString:@"["]) {
+            gJsonLogCount++;
+            os_log(gLog, "[RESP] %{public}s", txt.UTF8String);
+        }
+    }
+    return %orig;
+}
++ (id)dataWithJSONObject:(id)obj options:(unsigned long)opt error:(id *)err {
+    id r = %orig;
+    if (gNetLog && gJsonLogCount < 400 && [r isKindOfClass:[NSData class]]) {
+        NSString *txt = Describe(r, 900);
+        if ([txt containsString:@"{"] || [txt containsString:@"["]) {
+            gJsonLogCount++;
+            os_log(gLog, "[REQ] %{public}s", txt.UTF8String);
+        }
+    }
+    return r;
+}
+
+%end
+
 %ctor {
     gLog  = os_log_create("com.rev.projectionoverride", "general");
     gLock = [NSLock new];
     int deg = OrientationDeg();
     BOOL mir = [[NSUserDefaults standardUserDefaults] boolForKey:@"POMirror"];
     id m = [[NSUserDefaults standardUserDefaults] objectForKey:@"POScaleMode"];
-    os_log(gLog, "ProjectionOverride 2.1 已加载（朝向=%d° 镜像=%s 适配=%s）",
+    os_log(gLog, "ProjectionOverride 2.2 已加载（朝向=%d° 镜像=%s 适配=%s）",
            deg, mir ? "是" : "否", m ? "自定义" : "fit");
 
     gSimTarget = [POSimTarget new];
