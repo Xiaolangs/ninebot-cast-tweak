@@ -268,6 +268,37 @@ static void DumpArchive(NSString *path, const char *how) {
 %end
 
 
+
+// 直接转储内存数据（注意：writeToFile 钩子里文件还没落盘，不能回读 path —— 那是之前的 bug）
+static void DumpData(id data, NSString *hint, const char *how) {
+    if (![data isKindOfClass:[NSData class]]) return;
+    NSData *d = (NSData *)data;
+    if (d.length < 51200) return;
+    const unsigned char *b = (const unsigned char *)d.bytes;
+    BOOL isZip = (d.length >= 4 && b[0]=='P' && b[1]=='K' && (b[2]==3||b[2]==5) && (b[3]==4||b[3]==6));
+    char hex[24] = {0}, asc[10] = {0};
+    for (int i = 0; i < 8 && i < (int)d.length; i++) {
+        snprintf(hex + i*2, 3, "%02x", b[i]);
+        asc[i] = (b[i] >= 32 && b[i] < 127) ? (char)b[i] : '.';
+    }
+    Emit("[DATA] 大文件写入", "%s size=%lu zip=%s magic=%s '%s' -> %s", how,
+         (unsigned long)d.length, isZip ? "YES" : "NO", hex, asc,
+         hint.length > 90 ? [[hint substringToIndex:90] UTF8String] : hint.UTF8String);
+    if (!isZip) return;
+    NSArray *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    if (!docs.count) return;
+    NSString *dir = [docs[0] stringByAppendingPathComponent:@"POSkinDump"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                             withIntermediateDirectories:YES attributes:nil error:nil];
+    static int n = 0;
+    NSString *base = [hint lastPathComponent];
+    if (!base.length) base = @"data";
+    NSString *dst = [dir stringByAppendingPathComponent:
+                     [NSString stringWithFormat:@"%03d_%@.zip", ++n, base]];
+    [d writeToFile:dst atomically:YES];
+    Emit("[DATA] 已转储", "%s", dst.UTF8String);
+}
+
 // ===== SSZipArchive 解压入口：8 个变体全挂 =====
 %hook SSZipArchive
 
@@ -303,18 +334,39 @@ static void DumpArchive(NSString *path, const char *how) {
 %hook NSData
 
 - (BOOL)writeToFile:(id)path atomically:(BOOL)atom {
-    if (self.length > 51200) DumpArchive((NSString *)path, "write:atom");
+    DumpData(self, (NSString *)path, "write:atom");
     return %orig;
 }
 - (BOOL)writeToFile:(id)path options:(unsigned long)opt error:(id *)err {
-    if (self.length > 51200) DumpArchive((NSString *)path, "write:opt");
+    DumpData(self, (NSString *)path, "write:opt");
     return %orig;
+}
+
+%end
+
+
+%hook NSFileManager
+
+- (BOOL)createFileAtPath:(id)path contents:(id)contents attributes:(id)attrs {
+    DumpData(contents, (NSString *)path, "createFile");
+    return %orig;
+}
+
+- (BOOL)copyItemAtPath:(id)src toPath:(id)dst error:(id *)err {
+    BOOL r = %orig;
+    NSDictionary *a = [[NSFileManager defaultManager] attributesOfItemAtPath:src error:nil];
+    if ([a fileSize] > 51200) {
+        Emit("[DATA] 文件复制", "size=%llu %s -> %s",
+             [a fileSize], ((NSString *)src).UTF8String, ((NSString *)dst).UTF8String);
+        DumpArchive((NSString *)dst, "copyItem");
+    }
+    return r;
 }
 
 %end
 
 %ctor {
     gLog = os_log_create("com.rev.themeprobe", "general");
-    os_log(gLog, "ThemeProbe 1.2 已加载（主题接口 + 解密 + 全变体解压转储）");
+    os_log(gLog, "ThemeProbe 1.3 已加载（主题接口 + 解密 + 落盘转储）");
     os_log(gLog, "[BEAT] 心跳：%{public}s", "启动完成，等待皮肤资源流程");
 }
