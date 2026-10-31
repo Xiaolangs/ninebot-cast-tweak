@@ -236,6 +236,30 @@ static BOOL gNetLog = YES;
 static int  gJsonLogCount = 0;
 static int  gUrlLogCount  = 0;
 
+
+static NSString *Describe(id obj, NSUInteger maxLen);   // 前置声明
+
+// 打印数据头魔数（判定解密结果是什么格式，不必打全文）
+static NSString *Magic(id obj) {
+    if (![obj isKindOfClass:[NSData class]]) return @"-";
+    NSData *d = (NSData *)obj;
+    if (d.length < 4) return [NSString stringWithFormat:@"(len=%lu)", (unsigned long)d.length];
+    const unsigned char *b = (const unsigned char *)d.bytes;
+    NSMutableString *hex = [NSMutableString string];
+    for (int i = 0; i < 8 && i < (int)d.length; i++) [hex appendFormat:@"%02x", b[i]];
+    NSMutableString *asc = [NSMutableString string];
+    for (int i = 0; i < 8 && i < (int)d.length; i++)
+        [asc appendFormat:@"%c", (b[i] >= 32 && b[i] < 127) ? b[i] : '.'];
+    return [NSString stringWithFormat:@"len=%lu magic=%@ '%@'",
+            (unsigned long)d.length, hex, asc];
+}
+
+static void LogDec(const char *tag, id inData, id key, id outData) {
+    if (!gNetLog) return;
+    os_log(gLog, "[DEC] %{public}s\n  key =%{public}s\n  in  =%{public}s\n  out =%{public}s",
+           tag, Describe(key, 48).UTF8String, Magic(inData).UTF8String, Magic(outData).UTF8String);
+}
+
 // 把 id（NSData/NSString）转成可读片段
 static NSString *Describe(id obj, NSUInteger maxLen) {
     if (!obj) return @"(nil)";
@@ -479,42 +503,34 @@ static void InstallFloatingButton(void) {
 // 解密层：JCOREDataSecurity（+ / - 两种形式都挂）
 %hook JCOREDataSecurity
 
-+ (id)AES256DecryptData:(id)data withKey:(id)key {
-    id r = %orig;
-    if (gNetLog && gJsonLogCount < 400) {
-        gJsonLogCount++;
-        os_log(gLog, "[DEC] +AES256DecryptData key=%{public}s\n  in =%{public}s\n  out=%{public}s",
-               Describe(key, 64).UTF8String, Describe(data, 500).UTF8String, Describe(r, 900).UTF8String);
-    }
-    return r;
-}
-- (id)AES256DecryptData:(id)data withKey:(id)key {
-    id r = %orig;
-    if (gNetLog && gJsonLogCount < 400) {
-        gJsonLogCount++;
-        os_log(gLog, "[DEC] -AES256DecryptData key=%{public}s\n  in =%{public}s\n  out=%{public}s",
-               Describe(key, 64).UTF8String, Describe(data, 500).UTF8String, Describe(r, 900).UTF8String);
-    }
-    return r;
-}
-+ (id)decrypt:(id)cipher aesKey:(id)key {
-    id r = %orig;
-    if (gNetLog && gJsonLogCount < 400) {
-        gJsonLogCount++;
-        os_log(gLog, "[DEC] +decrypt:aesKey: key=%{public}s\n  in =%{public}s\n  out=%{public}s",
-               Describe(key, 64).UTF8String, Describe(cipher, 500).UTF8String, Describe(r, 900).UTF8String);
-    }
-    return r;
-}
-- (id)decrypt:(id)cipher aesKey:(id)key {
-    id r = %orig;
-    if (gNetLog && gJsonLogCount < 400) {
-        gJsonLogCount++;
-        os_log(gLog, "[DEC] -decrypt:aesKey: key=%{public}s\n  in =%{public}s\n  out=%{public}s",
-               Describe(key, 64).UTF8String, Describe(cipher, 500).UTF8String, Describe(r, 900).UTF8String);
-    }
-    return r;
-}
++ (id)AES256DecryptData:(id)d withKey:(id)k { id r = %orig; LogDec("+AES256DecryptData:withKey:", d, k, r); return r; }
+- (id)AES256DecryptData:(id)d withKey:(id)k { id r = %orig; LogDec("-AES256DecryptData:withKey:", d, k, r); return r; }
++ (id)aes256DecryptData:(id)d withKey:(id)k { id r = %orig; LogDec("+aes256DecryptData:withKey:", d, k, r); return r; }
+- (id)aes256DecryptData:(id)d withKey:(id)k { id r = %orig; LogDec("-aes256DecryptData:withKey:", d, k, r); return r; }
++ (id)aes256DecryptData:(id)d withKey:(id)k iv:(id)iv { id r = %orig; LogDec("+aes256DecryptData:withKey:iv:", d, k, r); return r; }
+- (id)aes256DecryptData:(id)d withKey:(id)k iv:(id)iv { id r = %orig; LogDec("-aes256DecryptData:withKey:iv:", d, k, r); return r; }
++ (id)aesDecryptData:(id)d withKey:(id)k iv:(id)iv { id r = %orig; LogDec("+aesDecryptData:withKey:iv:", d, k, r); return r; }
+- (id)aesDecryptData:(id)d withKey:(id)k iv:(id)iv { id r = %orig; LogDec("-aesDecryptData:withKey:iv:", d, k, r); return r; }
++ (id)sm4ECBDecryptData:(id)d withKey:(id)k { id r = %orig; LogDec("+sm4ECBDecryptData:", d, k, r); return r; }
+- (id)sm4ECBDecryptData:(id)d withKey:(id)k { id r = %orig; LogDec("-sm4ECBDecryptData:", d, k, r); return r; }
++ (id)sm4CBCDecryptData:(id)d withKey:(id)k iv:(id)iv { id r = %orig; LogDec("+sm4CBCDecryptData:", d, k, r); return r; }
+- (id)sm4CBCDecryptData:(id)d withKey:(id)k iv:(id)iv { id r = %orig; LogDec("-sm4CBCDecryptData:", d, k, r); return r; }
++ (id)decrypt:(id)c aesKey:(id)k { id r = %orig; LogDec("+decrypt:aesKey:", c, k, r); return r; }
+- (id)decrypt:(id)c aesKey:(id)k { id r = %orig; LogDec("-decrypt:aesKey:", c, k, r); return r; }
+
+%end
+
+%hook JCOREUtilities
+
++ (id)aesDecryptData:(id)d withKey:(id)k iv:(id)iv { id r = %orig; LogDec("+JCOREUtilities.aes", d, k, r); return r; }
+- (id)aesDecryptData:(id)d withKey:(id)k iv:(id)iv { id r = %orig; LogDec("-JCOREUtilities.aes", d, k, r); return r; }
+
+%end
+
+%hook JCORESm4Crypt
+
++ (id)ecbDecrypt:(id)d withKey:(id)k { id r = %orig; LogDec("+SM4.ecbDecrypt", d, k, r); return r; }
+- (id)ecbDecrypt:(id)d withKey:(id)k { id r = %orig; LogDec("-SM4.ecbDecrypt", d, k, r); return r; }
 
 %end
 
@@ -552,7 +568,7 @@ static void InstallFloatingButton(void) {
     int deg = OrientationDeg();
     BOOL mir = [[NSUserDefaults standardUserDefaults] boolForKey:@"POMirror"];
     id m = [[NSUserDefaults standardUserDefaults] objectForKey:@"POScaleMode"];
-    os_log(gLog, "ProjectionOverride 2.2 已加载（朝向=%d° 镜像=%s 适配=%s）",
+    os_log(gLog, "ProjectionOverride 2.3 已加载（朝向=%d° 镜像=%s 适配=%s）",
            deg, mir ? "是" : "否", m ? "自定义" : "fit");
 
     gSimTarget = [POSimTarget new];
