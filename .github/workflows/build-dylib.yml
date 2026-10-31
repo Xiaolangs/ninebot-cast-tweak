@@ -123,3 +123,43 @@ jobs:
           name: ProjectionOverride-plain
           path: ProjectionOverride.dylib
           if-no-files-found: error
+
+  # ── 方案 C：接口明文打印（独立 dylib，轻量）────────────────────────
+  build-net:
+    name: NetPlainLog build
+    runs-on: macos-14
+    env:
+      THEOS: ${{ github.workspace }}/theos
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Theos
+        run: |
+          set -euo pipefail
+          if [ ! -f "$THEOS/makefiles/common.mk" ] || [ ! -f "$THEOS/bin/logos.pl" ]; then
+            rm -rf "$THEOS"
+            git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
+          fi
+
+      - name: Install ldid
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install ldid || true
+
+      - name: Build NetPlainLog
+        working-directory: tweak-net
+        run: |
+          set -euo pipefail
+          make
+          find .theos -name 'NetPlainLog.dylib' -type f -print
+          DYLIB=$(find .theos -name 'NetPlainLog.dylib' | head -1)
+          test -n "$DYLIB"
+          nm -gU "$DYLIB" | grep -q _MSHookMessageEx
+          file "$DYLIB"
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp "$DYLIB" "$GITHUB_WORKSPACE/out/NetPlainLog.dylib"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetPlainLog
+          path: out/NetPlainLog.dylib
+          if-no-files-found: error
