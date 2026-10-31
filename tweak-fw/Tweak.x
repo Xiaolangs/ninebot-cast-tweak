@@ -242,6 +242,29 @@ static NSString *RewriteOtaBody(NSString *body) {
     return [result isEqualToString:body] ? nil : result;
 }
 
+
+// ===== NBEncrypt.EncryptUtil 对照采样 =====
+// 目标：拿到 (明文, 密文) 配对 + serviceTime，用于离线还原算法
+static int gEncN = 0;
+
+static void LogPair(const char *tag, id in, id out) {
+    if (gEncN >= 40) return;
+    gEncN++;
+    NSString *a = Describe(in, 1200);
+    NSString *b = Describe(out, 1200);
+    os_log(gLog, "[ENC] %{public}s\n  in =%{public}s\n  out=%{public}s",
+           tag, a.UTF8String, b.UTF8String);
+}
+
+static void LogClock(void) {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    id st = [d objectForKey:@"serviceTime"];
+    id ot = [d objectForKey:@"ostype"];
+    id cc = [d objectForKey:@"checkcode"];
+    os_log(gLog, "[ENC] serviceTime=%{public}s ostype=%{public}s checkcode=%{public}s",
+           Describe(st, 60).UTF8String, Describe(ot, 60).UTF8String, Describe(cc, 80).UTF8String);
+}
+
 %hook NSMutableURLRequest
 - (void)setHTTPBody:(id)body {
     if (LooksJSON(body) && DataHasKW((NSData *)body)) EmitFull("[REQ]", Plain(body));
@@ -564,6 +587,44 @@ static void DumpStack(const char *why, NSString *detail) {
         }
     }
     return %orig;
+}
+
+%end
+
+
+%hook _TtC9NBEncrypt11EncryptUtil
+
++ (id)encryptForNewWithParams:(id)params isPassport:(BOOL)passport {
+    LogClock();
+    id r = %orig;
+    LogPair("+encryptForNewWithParams", params, r);
+    return r;
+}
+- (id)encryptForNewWithParams:(id)params isPassport:(BOOL)passport {
+    LogClock();
+    id r = %orig;
+    LogPair("-encryptForNewWithParams", params, r);
+    return r;
+}
++ (id)encryptForNewWithStr:(id)str {
+    id r = %orig;
+    LogPair("+encryptForNewWithStr", str, r);
+    return r;
+}
+- (id)encryptForNewWithStr:(id)str {
+    id r = %orig;
+    LogPair("-encryptForNewWithStr", str, r);
+    return r;
+}
++ (id)decryptForNewWithStr:(id)str {
+    id r = %orig;
+    LogPair("+decryptForNewWithStr", str, r);
+    return r;
+}
+- (id)decryptForNewWithStr:(id)str {
+    id r = %orig;
+    LogPair("-decryptForNewWithStr", str, r);
+    return r;
 }
 
 %end
