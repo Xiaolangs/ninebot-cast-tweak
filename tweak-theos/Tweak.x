@@ -34,41 +34,32 @@ static BOOL OverrideEnabled(void) {
 
 
 // ---------------- 朝向 ----------------
-// 基准：已做垂直翻转使坐标系为左上原点（保证文字正向）
-// POOrientation: 0 或 180（默认 180，实测车机为 180 旋转）；POMirror: 水平镜像
-static void ApplyOrientation(CGContextRef ctx, size_t w, size_t h) {
-    CGContextTranslateCTM(ctx, 0, (CGFloat)h);
-    CGContextScaleCTM(ctx, 1, -1);                      // 基准翻转
-
-    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-    id o = [d objectForKey:@"POOrientation"];
-    int deg = o ? [o intValue] : 180;                   // 默认 180
-
-    if (deg == 180) {
-        CGContextTranslateCTM(ctx, (CGFloat)w, (CGFloat)h);
-        CGContextScaleCTM(ctx, -1, -1);                 // 绕中心旋转 180
-    }
-    if ([d boolForKey:@"POMirror"]) {
-        CGContextTranslateCTM(ctx, (CGFloat)w, 0);
-        CGContextScaleCTM(ctx, -1, 1);                  // 水平镜像
-    }
+// 两段式：先在「逻辑画布」上画内容，再按 POOrientation 旋转合成到 w×h 输出缓冲。
+// 90/270 时逻辑画布宽高互换（h×w），因此旋转后可无损贴满，不需要缩放。
+// POScaleMode: "fit"(默认，留黑边) / "fill"(裁切铺满)
+static int OrientationDeg(void) {
+    id o = [[NSUserDefaults standardUserDefaults] objectForKey:@"POOrientation"];
+    int d = o ? [o intValue] : 90;   // 默认 90°（可按需改 0/270）
+    if (d != 0 && d != 90 && d != 180 && d != 270) d = 180;
+    return d;
 }
 
-// ---------------- 你的画面 ----------------
-static CGImageRef RenderFrame(size_t w, size_t h) {
-    if (w == 0 || h == 0) return NULL;
+// 在 cw×ch 上绘制内容（左上原点）
+static CGImageRef RenderContent(size_t cw, size_t ch) {
+    if (cw == 0 || ch == 0) return NULL;
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
-    CGContextRef ctx = CGBitmapContextCreate(NULL, w, h, 8, 0, cs,
+    CGContextRef ctx = CGBitmapContextCreate(NULL, cw, ch, 8, 0, cs,
         kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
     CGColorSpaceRelease(cs);
     if (!ctx) return NULL;
 
-    ApplyOrientation(ctx, w, h);
+    CGContextTranslateCTM(ctx, 0, (CGFloat)ch);
+    CGContextScaleCTM(ctx, 1, -1);
 
+    CGFloat W = cw, H = ch;
     CGContextSetRGBFillColor(ctx, 0.05, 0.06, 0.09, 1.0);
-    CGContextFillRect(ctx, CGRectMake(0, 0, w, h));
+    CGContextFillRect(ctx, CGRectMake(0, 0, W, H));
 
-    CGFloat W = w, H = h;
     CGContextSetRGBFillColor(ctx, 0.13, 0.78, 0.55, 1.0);
     CGMutablePathRef p = CGPathCreateMutable();
     CGPathMoveToPoint(p, NULL, W*0.50, H*0.78);
@@ -99,6 +90,49 @@ static CGImageRef RenderFrame(size_t w, size_t h) {
     CGImageRef img = CGBitmapContextCreateImage(ctx);
     CGContextRelease(ctx);
     return img;
+}
+
+static CGImageRef RenderFrame(size_t w, size_t h) {
+    if (w == 0 || h == 0) return NULL;
+    int deg = OrientationDeg();
+
+    size_t cw = (deg == 90 || deg == 270) ? h : w;
+    size_t ch = (deg == 90 || deg == 270) ? w : h;
+
+    CGImageRef content = RenderContent(cw, ch);
+    if (!content) return NULL;
+
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate(NULL, w, h, 8, 0, cs,
+        kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
+    CGColorSpaceRelease(cs);
+    if (!ctx) { CGImageRelease(content); return NULL; }
+
+    CGContextSetRGBFillColor(ctx, 0, 0, 0, 1);
+    CGContextFillRect(ctx, CGRectMake(0, 0, w, h));
+
+    // 旋转后内容的包围盒：90/270 为 ch×cw，0/180 为 cw×ch
+    BOOL swap = (deg == 90 || deg == 270);
+    double outW = swap ? (double)ch : (double)cw;
+    double outH = swap ? (double)cw : (double)ch;
+    id modeObj = [[NSUserDefaults standardUserDefaults] objectForKey:@"POScaleMode"];
+    BOOL fill = modeObj && [modeObj isKindOfClass:[NSString class]] &&
+                [modeObj caseInsensitiveCompare:@"fill"] == NSOrderedSame;
+    double sx = (double)w / outW, sy = (double)h / outH;
+    double scale = fill ? (sx > sy ? sx : sy) : (sx < sy ? sx : sy);
+
+    CGContextTranslateCTM(ctx, w / 2.0, h / 2.0);
+    CGContextRotateCTM(ctx, (CGFloat)(deg * M_PI / 180.0));
+    CGContextScaleCTM(ctx, (CGFloat)scale, (CGFloat)scale);
+    CGContextTranslateCTM(ctx, -(CGFloat)cw / 2.0, -(CGFloat)ch / 2.0);  // 注意：cw/ch 是 size_t，取反前必须转浮点
+    CGContextTranslateCTM(ctx, 0, (CGFloat)ch);
+    CGContextScaleCTM(ctx, 1, -1);
+    CGContextDrawImage(ctx, CGRectMake(0, 0, cw, ch), content);
+    CGImageRelease(content);
+
+    CGImageRef out = CGBitmapContextCreateImage(ctx);
+    CGContextRelease(ctx);
+    return out;
 }
 
 static CGImageRef FrameForSize(size_t w, size_t h) {
@@ -273,10 +307,11 @@ static id FindLabel(id view, NSString *needle, int depth) {
     ((void (*)(id, SEL, id))objc_msgSend)(view, sel_registerName("addSubview:"), iv);
 
     // 车机按 180° 显示，预览反向旋转 → 肉眼所见即车机所见
-    id o = [[NSUserDefaults standardUserDefaults] objectForKey:@"POOrientation"];
-    int deg = o ? [o intValue] : 180;
-    if (deg == 180) {
-        POAffine t = {-1, 0, 0, -1, 0, 0};
+    // 预览做反向旋转：车机转 deg，预览转 -deg，肉眼所见即车机所见
+    int deg = OrientationDeg();
+    if (deg != 0) {
+        double a = -(deg * M_PI / 180.0);
+        POAffine t = { cos(a), sin(a), -sin(a), cos(a), 0, 0 };
         ((void (*)(id, SEL, POAffine))objc_msgSend)(iv, sel_registerName("setTransform:"), t);
     }
 
@@ -373,10 +408,11 @@ static void InstallFloatingButton(void) {
 %ctor {
     gLog  = os_log_create("com.rev.projectionoverride", "general");
     gLock = [NSLock new];
-    id o = [[NSUserDefaults standardUserDefaults] objectForKey:@"POOrientation"];
-    int deg = o ? [o intValue] : 180;
+    int deg = OrientationDeg();
     BOOL mir = [[NSUserDefaults standardUserDefaults] boolForKey:@"POMirror"];
-    os_log(gLog, "ProjectionOverride 2.0 已加载（朝向=%d° 镜像=%s）", deg, mir ? "是" : "否");
+    id m = [[NSUserDefaults standardUserDefaults] objectForKey:@"POScaleMode"];
+    os_log(gLog, "ProjectionOverride 2.1 已加载（朝向=%d° 镜像=%s 适配=%s）",
+           deg, mir ? "是" : "否", m ? "自定义" : "fit");
 
     gSimTarget = [POSimTarget new];
     id noBtn = [[NSUserDefaults standardUserDefaults] objectForKey:@"POSimFloatingButton"];
