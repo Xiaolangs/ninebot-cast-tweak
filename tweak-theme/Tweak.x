@@ -149,8 +149,15 @@ static void LogBig(const char *tag, id inData, id key, id outData) {
 // ===== 解压转储：绕过加密，直接把明文 zip 捞出来 =====
 // 皮肤包流程：加密bin → 内存解密 → 写 tmp/xxx（此时已是合法 zip）→ SSZipArchive 解压
 // 我们在解压前把源文件复制到 Documents/POSkinDump/，于是无需任何密钥即可拿到明文包。
+// 前置声明（定义在后面，避免顺序问题）
+static volatile int gInDump = 0;
+static BOOL PathInteresting(NSString *p);
+static BOOL RawWrite(NSData *d, NSString *path);
+
 static void DumpArchive(NSString *path, const char *how) {
+    if (gInDump) return;
     if (!path || ![path isKindOfClass:[NSString class]]) return;
+    if (!PathInteresting(path)) return;
     NSData *d = [NSData dataWithContentsOfFile:path];
     if (!d.length) { Emit("[ZIP] 读取失败", "%s path=%s", how, path.UTF8String); return; }
     const unsigned char *b = (const unsigned char *)d.bytes;
@@ -176,9 +183,10 @@ static void DumpArchive(NSString *path, const char *how) {
     NSString *base = [path lastPathComponent];
     NSString *name = [NSString stringWithFormat:@"%03d_%@.zip", ++n, base];
     NSString *dst = [dir stringByAppendingPathComponent:name];
-    NSError *err = nil;
-    [[NSFileManager defaultManager] copyItemAtPath:path toPath:dst error:&err];
-    Emit("[ZIP] 已转储", "%s (%s)", dst.UTF8String, err ? err.localizedDescription.UTF8String : "ok");
+    gInDump = 1;
+    BOOL ok = RawWrite(d, dst);
+    gInDump = 0;
+    Emit("[ZIP] 已转储", "%s (%s)", dst.UTF8String, ok ? "ok" : "fail");
 }
 
 %hook NSJSONSerialization
@@ -269,11 +277,40 @@ static void DumpArchive(NSString *path, const char *how) {
 
 
 
+
+// 只关心皮肤/主题相关路径，其它一律放过（启动时 RN 包/图片缓存太多，全拦会拖垮 App）
+static BOOL PathInteresting(NSString *p) {
+    if (!p.length) return NO;
+    NSString *low = p.lowercaseString;
+    static NSString *bad[] = {@"sdimagecache", @"/library/caches/com.", @"rct", @"jsbundle",
+                              @"node_modules", @".png", @".jpg", @".jpeg", @".webp",
+                              @".gif", @".mp3", @".ttf", @".otf"};
+    for (size_t i = 0; i < sizeof(bad)/sizeof(bad[0]); i++)
+        if ([low containsString:bad[i]]) return NO;
+    static NSString *good[] = {@"themeskin", @"dashskin", @"skin", @"theme", @"artist"};
+    for (size_t i = 0; i < sizeof(good)/sizeof(good[0]); i++)
+        if ([low containsString:good[i]]) return YES;
+    return NO;
+}
+
+// 低层写文件，绕开所有 ObjC 钩子（关键：避免 writeToFile 钩子自我递归）
+static BOOL RawWrite(NSData *d, NSString *path) {
+    const char *c = path.fileSystemRepresentation;
+    if (!c) return NO;
+    FILE *f = fopen(c, "wb");
+    if (!f) return NO;
+    size_t n = fwrite(d.bytes, 1, d.length, f);
+    fclose(f);
+    return n == d.length;
+}
+
 // 直接转储内存数据（注意：writeToFile 钩子里文件还没落盘，不能回读 path —— 那是之前的 bug）
 static void DumpData(id data, NSString *hint, const char *how) {
+    if (gInDump) return;                       // 递归保护
     if (![data isKindOfClass:[NSData class]]) return;
     NSData *d = (NSData *)data;
-    if (d.length < 51200) return;
+    if (d.length < 204800) return;             // 阈值提高到 200KB，避开小包
+    if (!PathInteresting(hint)) return;        // 只处理皮肤/主题路径
     const unsigned char *b = (const unsigned char *)d.bytes;
     BOOL isZip = (d.length >= 4 && b[0]=='P' && b[1]=='K' && (b[2]==3||b[2]==5) && (b[3]==4||b[3]==6));
     char hex[24] = {0}, asc[10] = {0};
@@ -293,10 +330,12 @@ static void DumpData(id data, NSString *hint, const char *how) {
     static int n = 0;
     NSString *base = [hint lastPathComponent];
     if (!base.length) base = @"data";
+    gInDump = 1;
     NSString *dst = [dir stringByAppendingPathComponent:
                      [NSString stringWithFormat:@"%03d_%@.zip", ++n, base]];
-    [d writeToFile:dst atomically:YES];
-    Emit("[DATA] 已转储", "%s", dst.UTF8String);
+    BOOL ok = RawWrite(d, dst);
+    gInDump = 0;
+    Emit("[DATA] 已转储", "%s (%s)", dst.UTF8String, ok ? "ok" : "fail");
 }
 
 // ===== SSZipArchive 解压入口：8 个变体全挂 =====
@@ -354,12 +393,7 @@ static void DumpData(id data, NSString *hint, const char *how) {
 
 - (BOOL)copyItemAtPath:(id)src toPath:(id)dst error:(id *)err {
     BOOL r = %orig;
-    NSDictionary *a = [[NSFileManager defaultManager] attributesOfItemAtPath:src error:nil];
-    if ([a fileSize] > 51200) {
-        Emit("[DATA] 文件复制", "size=%llu %s -> %s",
-             [a fileSize], ((NSString *)src).UTF8String, ((NSString *)dst).UTF8String);
-        DumpArchive((NSString *)dst, "copyItem");
-    }
+    if (PathInteresting((NSString *)dst)) DumpArchive((NSString *)dst, "copyItem");
     return r;
 }
 
@@ -367,6 +401,6 @@ static void DumpData(id data, NSString *hint, const char *how) {
 
 %ctor {
     gLog = os_log_create("com.rev.themeprobe", "general");
-    os_log(gLog, "ThemeProbe 1.3 已加载（主题接口 + 解密 + 落盘转储）");
+    os_log(gLog, "ThemeProbe 1.4 已加载（仅皮肤相关，安全转储）");
     os_log(gLog, "[BEAT] 心跳：%{public}s", "启动完成，等待皮肤资源流程");
 }
