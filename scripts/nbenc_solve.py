@@ -75,8 +75,9 @@ def main():
                     if not got:
                         continue
                     if got[:len(target)] == target or got[:16] == target[:16]:
-                        print(f"\n✅ 命中: body={bname} key={kname} mode=AES-{len(key)*8}-{mode.upper()}"
-                              f" iv={iv!r if iv else 'N/A'}")
+                        ivdesc = repr(iv) if iv else "N/A"
+                        print("\n✅ 命中: body=%s key=%s mode=AES-%d-%s iv=%s"
+                              % (bname, kname, len(key)*8, mode.upper(), ivdesc))
                         return
     print("\n❌ 未命中。可能原因：")
     print("  - d 里还包含额外封装（长度前缀/随机 IV 前置）")
