@@ -1,17 +1,9 @@
-// DebugLauncher — 主页悬浮按钮，打开 App 内置调试工具
+// DebugLauncher 2.0 — 点击首页「拥有爱车 第x天」文字，弹出 App 内置调试工具
 //
-// 零钩子：不使用 %hook，只在启动后创建一个可拖动悬浮按钮（穿透窗口，不拦其他触摸）。
-//   单击 → 打开内置调试工具主页
-//   长按 → 列出所有可用调试页供选择（同时把可用性打到 Console）
-//
-// 目标类（Swift，需用 Module.Class 形式取）：
-//   Vehicle.VehicleDebugToolHomeVC      ← 车辆调试工具主页（主目标）
-//   Common.DebugEntryViewController     ← 通用调试入口
-//   Ninebot.FileDebugListViewController ← 文件调试工具
-//   Vehicle.DynamicConfigListDebugVC    ← 动态配置调试
-//   Vehicle.DynamicDebugSettingListVC   ← 动态调试设置
-//   NBRouter.RouteDebugViewController   ← 路由调试
-//   Vehicle.BleCommandDebugVC           ← 蓝牙指令调试
+// 零钩子：不使用 %hook。
+//   1. 定时在视图树里找包含「拥有爱车」的 UILabel
+//   2. 给该 label 挂 UITapGestureRecognizer（单击=打开调试工具主页，长按=选择其它调试页）
+// 不建窗口、不挡触摸，只在 label 上附加手势。
 
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
@@ -19,10 +11,12 @@
 #import <os/log.h>
 
 static os_log_t gLog = NULL;
+static const NSInteger kDPTag = 0x44504247;   // 标记已挂载
+
+#pragma mark - 调试页候选
 
 typedef struct { const char *name; const char *title; } DPCand;
 
-// 顺序即优先级：单击时取第一个可用的
 static DPCand kCands[] = {
     {"Vehicle.VehicleDebugToolHomeVC",      "车辆调试工具主页"},
     {"Common.DebugEntryViewController",     "调试入口"},
@@ -38,7 +32,7 @@ static Class DPClass(int i) {
     return NSClassFromString([NSString stringWithUTF8String:kCands[i].name]);
 }
 
-// Swift 类通常没有无参 init；逐种方式尝试，全部包在 @try 里
+// Swift VC 通常没有无参 init；逐种方式尝试，全部包在 @try 里
 static UIViewController *DPMake(Class cls) {
     if (!cls) return nil;
     @try {
@@ -62,69 +56,7 @@ static UIViewController *DPMake(Class cls) {
     return nil;
 }
 
-static UIViewController *DPHost(void) {
-    UIViewController *host = nil;
-    for (UIWindow *w in UIApplication.sharedApplication.windows) {
-        if (w.hidden || w.alpha < 0.01) continue;
-        if (w.isKeyWindow) { host = w.rootViewController; break; }
-    }
-    if (!host) {
-        for (UIWindow *w in UIApplication.sharedApplication.windows) {
-            if (w.rootViewController) { host = w.rootViewController; break; }
-        }
-    }
-    while (host.presentedViewController) host = host.presentedViewController;
-    return host;
-}
-
-static void DPPresentVC(UIViewController *vc, const char *name) {
-    if (!vc) {
-        UIAlertController *a = [UIAlertController alertControllerWithTitle:@"打开失败"
-            message:@"该类存在但无法直接实例化（可能需要构造参数）"
-            preferredStyle:UIAlertControllerStyleAlert];
-        [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
-        [DPHost() presentViewController:a animated:YES completion:nil];
-        return;
-    }
-    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
-    nav.modalPresentationStyle = UIModalPresentationPageSheet;
-    os_log(gLog, "[DBG] 打开 %{public}s", name);
-    [DPHost() presentViewController:nav animated:YES completion:nil];
-}
-
-// 只实例化一次：创建成功就直接用这个实例打开
-static void DPOpen(int idx) {
-    Class c = DPClass(idx);
-    if (!c) {
-        os_log(gLog, "[DBG] 类缺失 %{public}s", kCands[idx].name);
-        return;
-    }
-    UIViewController *vc = DPMake(c);
-    if (!vc) { os_log(gLog, "[DBG] 无法实例化 %{public}s", kCands[idx].name); }
-    DPPresentVC(vc, kCands[idx].name);
-}
-
-#pragma mark - 穿透窗口
-
-
-@interface DPLauncher : NSObject
-@property (nonatomic, weak) UIWindow *hostWindow;
-@property (nonatomic, strong) UIButton *btn;
-@property (nonatomic, assign) CGPoint startCenter;
-@property (nonatomic, assign) BOOL dragged;
-+ (instancetype)shared;
-- (void)install;
-@end
-
-@implementation DPLauncher
-
-+ (instancetype)shared {
-    static DPLauncher *s; static dispatch_once_t once;
-    dispatch_once(&once, ^{ s = [DPLauncher new]; });
-    return s;
-}
-
-- (UIWindow *)appWindow {
+static UIWindow *DPKeyWindow(void) {
     UIWindow *best = nil;
     for (UIWindow *w in UIApplication.sharedApplication.windows) {
         if (w.hidden || w.alpha < 0.01) continue;
@@ -134,72 +66,39 @@ static void DPOpen(int idx) {
     return best;
 }
 
-// 把按钮挂到 App 自己的窗口上 —— 不创建覆盖窗口，就不会抢手势
-- (void)install {
-    if (self.btn && self.btn.superview) return;
-    UIWindow *w = [self appWindow];
-    if (!w) return;
-    self.hostWindow = w;
+static UIViewController *DPHost(void) {
+    UIViewController *host = DPKeyWindow().rootViewController;
+    while (host.presentedViewController) host = host.presentedViewController;
+    return host;
+}
 
-    if (!self.btn) {
-        UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
-        b.frame = CGRectMake(0, 0, 54, 54);
-        b.backgroundColor = [UIColor colorWithRed:0.95 green:0.35 blue:0.15 alpha:0.88];
-        [b setTitle:@"调试" forState:UIControlStateNormal];
-        b.titleLabel.font = [UIFont boldSystemFontOfSize:13];
-        [b setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-        b.layer.cornerRadius = 27;
-        b.layer.shadowColor = UIColor.blackColor.CGColor;
-        b.layer.shadowOpacity = 0.35; b.layer.shadowRadius = 4;
-        b.layer.shadowOffset = CGSizeMake(0, 2);
-        [b addTarget:self action:@selector(tap) forControlEvents:UIControlEventTouchUpInside];
-        UILongPressGestureRecognizer *lp =
-            [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(longPress:)];
-        lp.minimumPressDuration = 0.6;
-        [b addGestureRecognizer:lp];
-        UIPanGestureRecognizer *pan =
-            [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(pan:)];
-        [b addGestureRecognizer:pan];
-        b.center = CGPointMake(w.bounds.size.width - 46, w.bounds.size.height * 0.7);
-        self.btn = b;
+static void DPPresentVC(UIViewController *vc, const char *name) {
+    UIViewController *host = DPHost();
+    if (!host) return;
+    if (!vc) {
+        UIAlertController *a = [UIAlertController alertControllerWithTitle:@"打开失败"
+            message:@"该类存在但无法直接实例化（可能需要构造参数）"
+            preferredStyle:UIAlertControllerStyleAlert];
+        [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
+        [host presentViewController:a animated:YES completion:nil];
+        return;
     }
-    [w addSubview:self.btn];
-    [w bringSubviewToFront:self.btn];
-
-    static dispatch_once_t onceLog;
-    dispatch_once(&onceLog, ^{
-        for (int i = 0; i < kCandCount; i++)
-            os_log(gLog, "[DBG] %{public}s = %{public}s", kCands[i].name, DPClass(i) ? "存在" : "缺失");
-        os_log(gLog, "[DBG] 悬浮按钮已挂到 App 窗口（单击开调试工具，长按选择）");
-    });
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+    nav.modalPresentationStyle = UIModalPresentationPageSheet;
+    os_log(gLog, "[DBG] 打开 %{public}s", name);
+    [host presentViewController:nav animated:YES completion:nil];
 }
 
-// 页面切换/重建时按钮可能被移除，定时补挂
-- (void)keepAlive {
-    if (!self.btn || !self.btn.superview) [self install];
+static void DPOpen(int idx) {
+    Class c = DPClass(idx);
+    if (!c) { os_log(gLog, "[DBG] 类缺失 %{public}s", kCands[idx].name); return; }
+    UIViewController *vc = DPMake(c);
+    if (!vc) os_log(gLog, "[DBG] 无法实例化 %{public}s", kCands[idx].name);
+    DPPresentVC(vc, kCands[idx].name);
 }
 
-- (void)pan:(UIPanGestureRecognizer *)g {
-    CGPoint t = [g translationInView:self.btn.superview];
-    if (g.state == UIGestureRecognizerStateBegan) {
-        self.startCenter = self.btn.center; self.dragged = NO;
-    } else if (g.state == UIGestureRecognizerStateChanged) {
-        if (fabs(t.x) > 4 || fabs(t.y) > 4) self.dragged = YES;
-        CGPoint c = CGPointMake(self.startCenter.x + t.x, self.startCenter.y + t.y);
-        CGFloat half = self.btn.bounds.size.width / 2;
-        c.x = MAX(half, MIN(self.btn.superview.bounds.size.width - half, c.x));
-        c.y = MAX(half + 44, MIN(self.btn.superview.bounds.size.height - half, c.y));
-        self.btn.center = c;
-    } else if (g.state == UIGestureRecognizerStateEnded) {
-        CGFloat half = self.btn.bounds.size.width / 2, w = self.btn.superview.bounds.size.width;
-        CGPoint c = self.btn.center;
-        c.x = (c.x < w / 2) ? half + 4 : w - half - 4;
-        [UIView animateWithDuration:0.2 animations:^{ self.btn.center = c; }];
-    }
-}
-
-- (void)tap {
-    if (self.dragged) { self.dragged = NO; return; }
+// 单击：取第一个可用的调试页
+static void DPOpenFirstAvailable(void) {
     for (int i = 0; i < kCandCount; i++) {
         if (!DPClass(i)) continue;
         UIViewController *vc = DPMake(DPClass(i));
@@ -212,37 +111,101 @@ static void DPOpen(int idx) {
     [DPHost() presentViewController:a animated:YES completion:nil];
 }
 
-- (void)longPress:(UILongPressGestureRecognizer *)g {
+#pragma mark - 手势目标
+
+@interface DPTarget : NSObject
++ (instancetype)shared;
+- (void)onTap:(UITapGestureRecognizer *)g;
+- (void)onLongPress:(UILongPressGestureRecognizer *)g;
+@end
+
+@implementation DPTarget
++ (instancetype)shared {
+    static DPTarget *s; static dispatch_once_t once;
+    dispatch_once(&once, ^{ s = [DPTarget new]; });
+    return s;
+}
+
+- (void)onTap:(UITapGestureRecognizer *)g {
+    os_log(gLog, "[DBG] 命中「拥有爱车」标签（单击）");
+    DPOpenFirstAvailable();
+}
+
+- (void)onLongPress:(UILongPressGestureRecognizer *)g {
     if (g.state != UIGestureRecognizerStateBegan) return;
+    os_log(gLog, "[DBG] 命中「拥有爱车」标签（长按）");
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"选择调试页"
         message:nil preferredStyle:UIAlertControllerStyleActionSheet];
     for (int i = 0; i < kCandCount; i++) {
-        Class c = DPClass(i);
-        BOOL usable = (c != nil);
+        BOOL usable = (DPClass(i) != nil);
         NSString *t = [NSString stringWithFormat:@"%@%@", usable ? @"" : @"✗ ",
                        [NSString stringWithUTF8String:kCands[i].title]];
-        UIAlertAction *act = [UIAlertAction actionWithTitle:t
-            style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *x) { DPOpen(i); }];
-        [sheet addAction:act];
+        [sheet addAction:[UIAlertAction actionWithTitle:t style:UIAlertActionStyleDefault
+            handler:^(__unused UIAlertAction *x) { DPOpen(i); }]];
     }
     [sheet addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    sheet.popoverPresentationController.sourceView = self.btn;
-    sheet.popoverPresentationController.sourceRect = self.btn.bounds;
+    sheet.popoverPresentationController.sourceView = g.view;
+    sheet.popoverPresentationController.sourceRect = g.view.bounds;
     [DPHost() presentViewController:sheet animated:YES completion:nil];
 }
-
 @end
+
+#pragma mark - 视图树查找
+
+static UILabel *DPFindLabel(UIView *view, NSString *needle, int depth) {
+    if (!view || depth > 40) return nil;
+    if ([view isKindOfClass:[UILabel class]]) {
+        UILabel *l = (UILabel *)view;
+        if (l.text.length && [l.text containsString:needle]) return l;
+    }
+    for (UIView *sv in view.subviews) {
+        UILabel *hit = DPFindLabel(sv, needle, depth + 1);
+        if (hit) return hit;
+    }
+    return nil;
+}
+
+static void DPInstallOnLabel(void) {
+    UIWindow *w = DPKeyWindow();
+    UIViewController *root = w.rootViewController;
+    if (!root || !root.view) return;
+
+    UILabel *l = DPFindLabel(root.view, @"拥有爱车", 0);
+    if (!l) l = DPFindLabel(root.view, @"爱车", 0);
+    if (!l) return;
+    if (l.tag == kDPTag) return;         // 已挂载（含复用后的重复检测）
+
+    l.tag = kDPTag;
+    l.userInteractionEnabled = YES;
+
+    UITapGestureRecognizer *tap =
+        [[UITapGestureRecognizer alloc] initWithTarget:[DPTarget shared] action:@selector(onTap:)];
+    [l addGestureRecognizer:tap];
+
+    UILongPressGestureRecognizer *lp =
+        [[UILongPressGestureRecognizer alloc] initWithTarget:[DPTarget shared] action:@selector(onLongPress:)];
+    lp.minimumPressDuration = 0.6;
+    [l addGestureRecognizer:lp];
+
+    os_log(gLog, "[DBG] ✅ 已挂载点击手势，label.text=「%{public}s」", l.text.UTF8String);
+}
 
 __attribute__((constructor)) static void DPInit(void) {
     gLog = os_log_create("com.rev.debuglauncher", "general");
-    os_log(gLog, "DebugLauncher 1.2 已加载");
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+    os_log(gLog, "DebugLauncher 2.0 已加载（点击「拥有爱车 第x天」打开调试工具）");
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        [[DPLauncher shared] install];
-        // 每 2 秒检查一次：窗口重建或页面切换导致按钮被移除时自动补挂
-        NSTimer *t = [NSTimer scheduledTimerWithTimeInterval:2.0 repeats:YES
-                                                    block:^(__unused NSTimer *tm) {
-            [[DPLauncher shared] keepAlive];
+        // 启动时打印候选类可用性
+        for (int i = 0; i < kCandCount; i++)
+            os_log(gLog, "[DBG] %{public}s = %{public}s", kCands[i].name, DPClass(i) ? "存在" : "缺失");
+
+        // 前 40 次每 1.5 秒扫一次（等 RN 页面渲染完），之后每 10 秒兜底
+        __block int n = 0;
+        NSTimer *t = [NSTimer scheduledTimerWithTimeInterval:1.5 repeats:YES
+                                                    block:^(NSTimer *tm) {
+            DPInstallOnLabel();
+            if (++n > 40) tm.timeInterval = 10.0;
         }];
         [[NSRunLoop mainRunLoop] addTimer:t forMode:NSRunLoopCommonModes];
     });
