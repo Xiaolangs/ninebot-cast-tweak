@@ -77,42 +77,38 @@ static UIViewController *DPHost(void) {
     return host;
 }
 
-static void DPPresent(int idx) {
-    UIViewController *vc = DPMake(DPClass(idx));
+static void DPPresentVC(UIViewController *vc, const char *name) {
     if (!vc) {
-        os_log(gLog, "[DBG] 无法实例化 %{public}s", kCands[idx].name);
         UIAlertController *a = [UIAlertController alertControllerWithTitle:@"打开失败"
-            message:[NSString stringWithFormat:@"%s 存在但无法直接实例化（可能需要参数）",
-                     kCands[idx].name] preferredStyle:UIAlertControllerStyleAlert];
+            message:@"该类存在但无法直接实例化（可能需要构造参数）"
+            preferredStyle:UIAlertControllerStyleAlert];
         [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
         [DPHost() presentViewController:a animated:YES completion:nil];
         return;
     }
     UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
     nav.modalPresentationStyle = UIModalPresentationPageSheet;
-    os_log(gLog, "[DBG] 打开 %{public}s", kCands[idx].name);
+    os_log(gLog, "[DBG] 打开 %{public}s", name);
     [DPHost() presentViewController:nav animated:YES completion:nil];
+}
+
+// 只实例化一次：创建成功就直接用这个实例打开
+static void DPOpen(int idx) {
+    Class c = DPClass(idx);
+    if (!c) {
+        os_log(gLog, "[DBG] 类缺失 %{public}s", kCands[idx].name);
+        return;
+    }
+    UIViewController *vc = DPMake(c);
+    if (!vc) { os_log(gLog, "[DBG] 无法实例化 %{public}s", kCands[idx].name); }
+    DPPresentVC(vc, kCands[idx].name);
 }
 
 #pragma mark - 穿透窗口
 
-@interface DPWindow : UIWindow
-@property (nonatomic, weak) UIView *interactiveView;   // 只放行这个视图及其子视图
-@end
-@implementation DPWindow
-// 关键：除「悬浮按钮子树」外，一律返回 nil，让触摸落到下层 App 窗口。
-// （只判断 v==self 是不够的：rootViewController.view 铺满全屏，会命中它。）
-- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    UIView *v = [super hitTest:point withEvent:event];
-    if (!v) return nil;
-    UIView *target = self.interactiveView;
-    if (target && (v == target || [v isDescendantOfView:target])) return v;
-    return nil;
-}
-@end
 
 @interface DPLauncher : NSObject
-@property (nonatomic, strong) DPWindow *win;
+@property (nonatomic, weak) UIWindow *hostWindow;
 @property (nonatomic, strong) UIButton *btn;
 @property (nonatomic, assign) CGPoint startCenter;
 @property (nonatomic, assign) BOOL dragged;
@@ -128,50 +124,59 @@ static void DPPresent(int idx) {
     return s;
 }
 
+- (UIWindow *)appWindow {
+    UIWindow *best = nil;
+    for (UIWindow *w in UIApplication.sharedApplication.windows) {
+        if (w.hidden || w.alpha < 0.01) continue;
+        if (w.isKeyWindow) return w;
+        if (!best && w.rootViewController) best = w;
+    }
+    return best;
+}
+
+// 把按钮挂到 App 自己的窗口上 —— 不创建覆盖窗口，就不会抢手势
 - (void)install {
-    if (self.win) return;
-    UIWindowScene *scene = nil;
-    for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
-        if ([sc isKindOfClass:[UIWindowScene class]] &&
-            sc.activationState == UISceneActivationStateForegroundActive) { scene = (UIWindowScene *)sc; break; }
+    if (self.btn && self.btn.superview) return;
+    UIWindow *w = [self appWindow];
+    if (!w) return;
+    self.hostWindow = w;
+
+    if (!self.btn) {
+        UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
+        b.frame = CGRectMake(0, 0, 54, 54);
+        b.backgroundColor = [UIColor colorWithRed:0.95 green:0.35 blue:0.15 alpha:0.88];
+        [b setTitle:@"调试" forState:UIControlStateNormal];
+        b.titleLabel.font = [UIFont boldSystemFontOfSize:13];
+        [b setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+        b.layer.cornerRadius = 27;
+        b.layer.shadowColor = UIColor.blackColor.CGColor;
+        b.layer.shadowOpacity = 0.35; b.layer.shadowRadius = 4;
+        b.layer.shadowOffset = CGSizeMake(0, 2);
+        [b addTarget:self action:@selector(tap) forControlEvents:UIControlEventTouchUpInside];
+        UILongPressGestureRecognizer *lp =
+            [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(longPress:)];
+        lp.minimumPressDuration = 0.6;
+        [b addGestureRecognizer:lp];
+        UIPanGestureRecognizer *pan =
+            [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(pan:)];
+        [b addGestureRecognizer:pan];
+        b.center = CGPointMake(w.bounds.size.width - 46, w.bounds.size.height * 0.7);
+        self.btn = b;
     }
-    DPWindow *w = scene ? [[DPWindow alloc] initWithWindowScene:scene]
-                        : [[DPWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
-    w.windowLevel = UIWindowLevelAlert + 1;
-    w.backgroundColor = UIColor.clearColor;
-    w.rootViewController = [UIViewController new];
+    [w addSubview:self.btn];
+    [w bringSubviewToFront:self.btn];
 
-    UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
-    b.frame = CGRectMake(0, 0, 54, 54);
-    b.backgroundColor = [UIColor colorWithRed:0.95 green:0.35 blue:0.15 alpha:0.88];
-    [b setTitle:@"调试" forState:UIControlStateNormal];
-    b.titleLabel.font = [UIFont boldSystemFontOfSize:13];
-    [b setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-    b.layer.cornerRadius = 27;
-    b.layer.shadowColor = UIColor.blackColor.CGColor;
-    b.layer.shadowOpacity = 0.35; b.layer.shadowRadius = 4;
-    b.layer.shadowOffset = CGSizeMake(0, 2);
-    [b addTarget:self action:@selector(tap) forControlEvents:UIControlEventTouchUpInside];
-    UILongPressGestureRecognizer *lp =
-        [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(longPress:)];
-    lp.minimumPressDuration = 0.6;
-    [b addGestureRecognizer:lp];
-    UIPanGestureRecognizer *pan =
-        [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(pan:)];
-    [b addGestureRecognizer:pan];
+    static dispatch_once_t onceLog;
+    dispatch_once(&onceLog, ^{
+        for (int i = 0; i < kCandCount; i++)
+            os_log(gLog, "[DBG] %{public}s = %{public}s", kCands[i].name, DPClass(i) ? "存在" : "缺失");
+        os_log(gLog, "[DBG] 悬浮按钮已挂到 App 窗口（单击开调试工具，长按选择）");
+    });
+}
 
-    b.center = CGPointMake(w.bounds.size.width - 46, w.bounds.size.height * 0.7);
-    [w.rootViewController.view addSubview:b];
-    w.interactiveView = b;      // 仅按钮可点击
-    w.hidden = NO;
-    self.win = w; self.btn = b;
-
-    // 启动时把可用性打到 Console，便于后续排查
-    for (int i = 0; i < kCandCount; i++) {
-        Class c = DPClass(i);
-        os_log(gLog, "[DBG] %{public}s = %{public}s", kCands[i].name, c ? "存在" : "缺失");
-    }
-    os_log(gLog, "[DBG] 悬浮按钮已安装（单击开调试工具，长按选择）");
+// 页面切换/重建时按钮可能被移除，定时补挂
+- (void)keepAlive {
+    if (!self.btn || !self.btn.superview) [self install];
 }
 
 - (void)pan:(UIPanGestureRecognizer *)g {
@@ -196,10 +201,13 @@ static void DPPresent(int idx) {
 - (void)tap {
     if (self.dragged) { self.dragged = NO; return; }
     for (int i = 0; i < kCandCount; i++) {
-        if (DPMake(DPClass(i))) { DPPresent(i); return; }
+        if (!DPClass(i)) continue;
+        UIViewController *vc = DPMake(DPClass(i));
+        if (vc) { DPPresentVC(vc, kCands[i].name); return; }
     }
     UIAlertController *a = [UIAlertController alertControllerWithTitle:@"未找到调试工具"
-        message:@"内置调试类均不可用，请查看 Console 中的 [DBG] 日志" preferredStyle:UIAlertControllerStyleAlert];
+        message:@"内置调试类均不可用，请查看 Console 中的 [DBG] 日志"
+        preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
     [DPHost() presentViewController:a animated:YES completion:nil];
 }
@@ -214,7 +222,7 @@ static void DPPresent(int idx) {
         NSString *t = [NSString stringWithFormat:@"%@%@", usable ? @"" : @"✗ ",
                        [NSString stringWithUTF8String:kCands[i].title]];
         UIAlertAction *act = [UIAlertAction actionWithTitle:t
-            style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *x) { DPPresent(i); }];
+            style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *x) { DPOpen(i); }];
         [sheet addAction:act];
     }
     [sheet addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
@@ -227,7 +235,15 @@ static void DPPresent(int idx) {
 
 __attribute__((constructor)) static void DPInit(void) {
     gLog = os_log_create("com.rev.debuglauncher", "general");
-    os_log(gLog, "DebugLauncher 1.1 已加载");
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{ [[DPLauncher shared] install]; });
+    os_log(gLog, "DebugLauncher 1.2 已加载");
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [[DPLauncher shared] install];
+        // 每 2 秒检查一次：窗口重建或页面切换导致按钮被移除时自动补挂
+        NSTimer *t = [NSTimer scheduledTimerWithTimeInterval:2.0 repeats:YES
+                                                    block:^(__unused NSTimer *tm) {
+            [[DPLauncher shared] keepAlive];
+        }];
+        [[NSRunLoop mainRunLoop] addTimer:t forMode:NSRunLoopCommonModes];
+    });
 }
