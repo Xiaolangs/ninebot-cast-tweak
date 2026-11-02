@@ -97,11 +97,17 @@ static void DPPresent(int idx) {
 #pragma mark - 穿透窗口
 
 @interface DPWindow : UIWindow
+@property (nonatomic, weak) UIView *interactiveView;   // 只放行这个视图及其子视图
 @end
 @implementation DPWindow
+// 关键：除「悬浮按钮子树」外，一律返回 nil，让触摸落到下层 App 窗口。
+// （只判断 v==self 是不够的：rootViewController.view 铺满全屏，会命中它。）
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *v = [super hitTest:point withEvent:event];
-    return (v == self) ? nil : v;
+    if (!v) return nil;
+    UIView *target = self.interactiveView;
+    if (target && (v == target || [v isDescendantOfView:target])) return v;
+    return nil;
 }
 @end
 
@@ -156,6 +162,7 @@ static void DPPresent(int idx) {
 
     b.center = CGPointMake(w.bounds.size.width - 46, w.bounds.size.height * 0.7);
     [w.rootViewController.view addSubview:b];
+    w.interactiveView = b;      // 仅按钮可点击
     w.hidden = NO;
     self.win = w; self.btn = b;
 
@@ -220,7 +227,7 @@ static void DPPresent(int idx) {
 
 __attribute__((constructor)) static void DPInit(void) {
     gLog = os_log_create("com.rev.debuglauncher", "general");
-    os_log(gLog, "DebugLauncher 1.0 已加载");
+    os_log(gLog, "DebugLauncher 1.1 已加载");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ [[DPLauncher shared] install]; });
 }
