@@ -11,6 +11,7 @@
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import <os/log.h>
 
 static os_log_t gLog = NULL;
