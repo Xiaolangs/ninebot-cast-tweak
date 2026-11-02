@@ -436,7 +436,7 @@ jobs:
           if-no-files-found: error
 
   build-debug:
-    name: DebugPanel build
+    name: DebugLauncher build
     runs-on: macos-14
     env:
       THEOS: ${{ github.workspace }}/theos
@@ -450,17 +450,17 @@ jobs:
           fi
       - name: Install ldid
         run: HOMEBREW_NO_AUTO_UPDATE=1 brew install ldid || true
-      - name: Build DebugPanel
+      - name: Build DebugLauncher
         working-directory: tweak-debug
         run: |
           set -euo pipefail
           make
-          D=$(find .theos -name 'DebugPanel.dylib' | head -1); test -n "$D"
+          D=$(find .theos -name 'DebugLauncher.dylib' | head -1); test -n "$D"
           mkdir -p "$GITHUB_WORKSPACE/out"
-          cp "$D" "$GITHUB_WORKSPACE/out/DebugPanel.dylib"
+          cp "$D" "$GITHUB_WORKSPACE/out/DebugLauncher.dylib"
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DebugPanel
-          path: out/DebugPanel.dylib
+          name: DebugLauncher
+          path: out/DebugLauncher.dylib
           if-no-files-found: error
