@@ -131,7 +131,11 @@ static NSString *DocPath(NSString *name) {
 
 static void DumpFromVC(UIViewController *vc) {
     os_log(gLog, "[CMD] ---- 开始扫描 ----");
-    if (vc.tableView) os_log(gLog, "[CMD] 表格行数 = %ld", (long)[vc.tableView numberOfRowsInSection:0]);
+    @try {
+        id tv = [vc valueForKey:@"tableView"];
+        if ([tv isKindOfClass:[UITableView class]])
+            os_log(gLog, "[CMD] 表格行数 = %ld", (long)[(UITableView *)tv numberOfRowsInSection:0]);
+    } @catch (__unused NSException *e) {}
     Describe(vc, "VC", 0);
 
     NSMutableArray *out = [NSMutableArray array];
