@@ -200,12 +200,13 @@ __attribute__((constructor)) static void DPInit(void) {
         for (int i = 0; i < kCandCount; i++)
             os_log(gLog, "[DBG] %{public}s = %{public}s", kCands[i].name, DPClass(i) ? "存在" : "缺失");
 
-        // 前 40 次每 1.5 秒扫一次（等 RN 页面渲染完），之后每 10 秒兜底
+        // 前 40 次（约 60 秒）每 1.5 秒扫一次，等 RN 首页渲染完；
+        // 之后每 7 个 tick（约 10 秒）兜底一次，避免长期高频遍历视图树。
         __block int n = 0;
         NSTimer *t = [NSTimer scheduledTimerWithTimeInterval:1.5 repeats:YES
-                                                    block:^(NSTimer *tm) {
-            DPInstallOnLabel();
-            if (++n > 40) tm.timeInterval = 10.0;
+                                                    block:^(__unused NSTimer *tm) {
+            n++;
+            if (n <= 40 || (n % 7) == 0) DPInstallOnLabel();
         }];
         [[NSRunLoop mainRunLoop] addTimer:t forMode:NSRunLoopCommonModes];
     });
