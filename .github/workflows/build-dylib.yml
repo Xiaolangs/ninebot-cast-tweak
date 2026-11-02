@@ -16,6 +16,7 @@ on:
       - 'tweak-keybody/**'
       - 'tweak-cccrypt/**'
       - 'tweak-debug/**'
+      - 'tweak-cmddump/**'
       - '.github/workflows/build-dylib.yml'
   pull_request:
   workflow_dispatch:
@@ -463,4 +464,34 @@ jobs:
         with:
           name: DebugLauncher
           path: out/DebugLauncher.dylib
+          if-no-files-found: error
+
+  build-cmddump:
+    name: CmdDump build
+    runs-on: macos-14
+    env:
+      THEOS: ${{ github.workspace }}/theos
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Theos
+        run: |
+          set -euo pipefail
+          if [ ! -f "$THEOS/makefiles/common.mk" ] || [ ! -f "$THEOS/bin/logos.pl" ]; then
+            rm -rf "$THEOS"; git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
+          fi
+      - name: Install ldid
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install ldid || true
+      - name: Build CmdDump
+        working-directory: tweak-cmddump
+        run: |
+          set -euo pipefail
+          make
+          D=$(find .theos -name 'CmdDump.dylib' | head -1); test -n "$D"
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp "$D" "$GITHUB_WORKSPACE/out/CmdDump.dylib"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CmdDump
+          path: out/CmdDump.dylib
           if-no-files-found: error
