@@ -124,10 +124,12 @@ static void SendFileSet(void) {
     for (int i = 0; i < 4; i++) [data addObject:@((code >> (i*8)) & 0xFF)];
     for (int i = 0; i < 2; i++) [data addObject:@((ver  >> (i*8)) & 0xFF)];
 
+    // CSV 799: dis,fileSet,write,s_index=1,s_cmd=139,r_cmd=139,proto=5AA5,timeout=5000
     NSDictionary *p = @{@"moduleName": gModuleName,
                         @"cmd": @"fileSet",
                         @"index": [NSString stringWithFormat:@"%ld", (long)gIndex],
-                        @"data": data};
+                        @"data": data,
+                        @"timeOut": @5000};
     NSData *j = [NSJSONSerialization dataWithJSONObject:p options:0 error:nil];
     NSString *s = [[NSString alloc] initWithData:j encoding:NSUTF8StringEncoding];
     os_log(gLog, "[TP] → fileSet %{public}s", s.UTF8String);
@@ -321,14 +323,44 @@ static NSString *FindRFSInDir(NSString *dir) {
 }
 @end
 
+#pragma mark - 录制 App 自身的调用（用于比对我们下发的参数）
+
+static IMP gOrigFT = NULL;
+static IMP gOrigBle = NULL;
+
+static void MyFileTransfer(id self, SEL _cmd, id params) {
+    os_log(gLog, "[TP] 📥 App 自身调用 fileTransfer: %{public}s", [[params description] UTF8String]);
+    if (gOrigFT) ((void (*)(id, SEL, id))gOrigFT)(self, _cmd, params);
+}
+static void MyBleCmdResponse(id self, SEL _cmd, id params) {
+    os_log(gLog, "[TP] 📥 App 自身调用 writeBleModuleCmdResponse: %{public}s", [[params description] UTF8String]);
+    if (gOrigBle) ((void (*)(id, SEL, id))gOrigBle)(self, _cmd, params);
+}
+
+static void InstallRecorders(void) {
+    for (NSString *cn in @[@"_TtC7Vehicle19RNFileManagerModule", @"Vehicle.RNFileManagerModule"]) {
+        Class c = NSClassFromString(cn); if (!c) continue;
+        Method m = class_getInstanceMethod(c, sel_registerName("fileTransfer:"));
+        if (m && !gOrigFT) { gOrigFT = method_setImplementation(m, (IMP)MyFileTransfer);
+            os_log(gLog, "[TP] 已挂 fileTransfer: 录制"); break; }
+    }
+    for (NSString *cn in @[@"_TtC7Vehicle11RNBleModule", @"Vehicle.RNBleModule"]) {
+        Class c = NSClassFromString(cn); if (!c) continue;
+        Method m = class_getInstanceMethod(c, sel_registerName("writeBleModuleCmdResponse:"));
+        if (m && !gOrigBle) { gOrigBle = method_setImplementation(m, (IMP)MyBleCmdResponse);
+            os_log(gLog, "[TP] 已挂 writeBleModuleCmdResponse: 录制"); break; }
+    }
+}
+
 __attribute__((constructor)) static void TPInit(void) {
     gLog = os_log_create("com.rev.themepush", "general");
-    os_log(gLog, "ThemePush 1.2 已加载（修正 RNBleModule 类名）");
+    os_log(gLog, "ThemePush 1.3 已加载（fileSet 补 timeOut=5000 + 录制 App 调用）");
     // 立刻挂捕获钩子 —— 必须早于 RN bridge 创建模块
     CaptureInit(NSClassFromString(@"_TtC7Vehicle19RNFileManagerModule"), NO);
     CaptureInit(NSClassFromString(@"Vehicle.RNFileManagerModule"), NO);
     CaptureInit(NSClassFromString(@"_TtC7Vehicle11RNBleModule"), YES);
     CaptureInit(NSClassFromString(@"Vehicle.RNBleModule"), YES);
+    InstallRecorders();
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         Class fm = NSClassFromString(@"_TtC7Vehicle19RNFileManagerModule");
