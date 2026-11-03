@@ -49,39 +49,73 @@ static NSString *Docs(void) {
     return [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
 }
 
-// RN 模块实例：优先从 RCTBridge 取，失败则自建
-static id FindRNModule(NSString *clsName) {
+// RN 模块实例：只使用「RN 自己创建的真实实例」。
+// 绝不能自建 —— Swift RN 模块依赖 bridge 注入，alloc/init 出来的空壳一调用必崩。
+static id gCapturedFileModule = nil;
+static id gCapturedBleModule  = nil;
+
+static void CaptureInit(Class cls, BOOL isBle) {
+    if (!cls) return;
+    SEL initSel = sel_registerName("init");
+    Method m = class_getInstanceMethod(cls, initSel);
+    if (!m) { os_log(gLog, "[TP] %{public}s 无 -init", class_getName(cls)); return; }
+    IMP orig = method_getImplementation(m);
+    method_setImplementation(m, imp_implementationWithBlock(^id(id self) {
+        id r = ((id (*)(id, SEL))orig)(self, initSel);
+        if (r) {
+            if (isBle) gCapturedBleModule = r; else gCapturedFileModule = r;
+            os_log(gLog, "[TP] ✅ 捕获真实 RN 模块 %{public}s", class_getName(object_getClass(r)));
+        }
+        return r;
+    }));
+    os_log(gLog, "[TP] 已挂 -init 捕获 %{public}s", class_getName(cls));
+}
+
+static id FindRNModule(NSString *clsName, BOOL isBle) {
+    id cap = isBle ? gCapturedBleModule : gCapturedFileModule;
+    if (cap) return cap;
+
     Class c = NSClassFromString(clsName);
-    if (!c) return nil;
     Class bcls = NSClassFromString(@"RCTBridge");
-    if (bcls) {
+    if (c && bcls) {
         SEL cur = NSSelectorFromString(@"currentBridge");
         if ([bcls respondsToSelector:cur]) {
             @try {
                 id bridge = ((id(*)(id,SEL))objc_msgSend)(bcls, cur);
                 if (bridge) {
-                    SEL m = NSSelectorFromString(@"moduleForClass:");
-                    if ([bridge respondsToSelector:m]) {
-                        id o = ((id(*)(id,SEL,Class))objc_msgSend)(bridge, m, c);
-                        if (o) { os_log(gLog, "[TP] 从 bridge 取到 %{public}s", clsName.UTF8String); return o; }
+                    for (NSString *selName in @[@"moduleForClass:", @"moduleForName:"]) {
+                        SEL m = NSSelectorFromString(selName);
+                        if (![bridge respondsToSelector:m]) continue;
+                        id o = [selName isEqualToString:@"moduleForClass:"]
+                             ? ((id(*)(id,SEL,Class))objc_msgSend)(bridge, m, c)
+                             : ((id(*)(id,SEL,id))objc_msgSend)(bridge, m, clsName);
+                        if (o) {
+                            if (isBle) gCapturedBleModule = o; else gCapturedFileModule = o;
+                            os_log(gLog, "[TP] 从 bridge 取到 %{public}s", clsName.UTF8String);
+                            return o;
+                        }
                     }
                 }
             } @catch (__unused NSException *e) {}
         }
     }
-    @try {
-        id o = [[c alloc] init];
-        if (o) { os_log(gLog, "[TP] 自建 %{public}s", clsName.UTF8String); return o; }
-    } @catch (__unused NSException *e) {}
     return nil;
 }
 
 #pragma mark - 两步
 
 static void SendFileSet(void) {
-    if (!gBleModule) gBleModule = FindRNModule(@"_TtC7Vehicle12RNBleModule");
-    if (!gBleModule) gBleModule = FindRNModule(@"Vehicle.RNBleModule");
-    if (!gBleModule) { os_log(gLog, "[TP] ❌ 找不到 RNBleModule"); return; }
+    gBleModule = FindRNModule(@"_TtC7Vehicle12RNBleModule", YES);
+    if (!gBleModule) gBleModule = FindRNModule(@"Vehicle.RNBleModule", YES);
+    if (!gBleModule) {
+        os_log(gLog, "[TP] ❌ 尚未捕获到 RNBleModule 实例");
+        UIAlertController *a = [UIAlertController alertControllerWithTitle:@"模块未就绪"
+            message:@"请先打开一次「皮肤商店 / 主题中心」让 RN 创建模块，再重试"
+            preferredStyle:UIAlertControllerStyleAlert];
+        [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
+        [TopVC() presentViewController:a animated:YES completion:nil];
+        return;
+    }
 
     // data = [code u32 LE] + [ver u16 LE]
     uint32_t code = (uint32_t)gFileCode;
@@ -105,9 +139,17 @@ static void SendFileSet(void) {
 }
 
 static void SendFileTransfer(NSString *localPath) {
-    if (!gFileModule) gFileModule = FindRNModule(@"_TtC7Vehicle19RNFileManagerModule");
-    if (!gFileModule) gFileModule = FindRNModule(@"Vehicle.RNFileManagerModule");
-    if (!gFileModule) { os_log(gLog, "[TP] ❌ 找不到 RNFileManagerModule"); return; }
+    gFileModule = FindRNModule(@"_TtC7Vehicle19RNFileManagerModule", NO);
+    if (!gFileModule) gFileModule = FindRNModule(@"Vehicle.RNFileManagerModule", NO);
+    if (!gFileModule) {
+        os_log(gLog, "[TP] ❌ 尚未捕获到 RNFileManagerModule 实例（拒绝自建，避免闪退）");
+        UIAlertController *a = [UIAlertController alertControllerWithTitle:@"模块未就绪"
+            message:@"请先进入「主题中心」浏览一次，让 RN 创建文件传输模块后重试"
+            preferredStyle:UIAlertControllerStyleAlert];
+        [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
+        [TopVC() presentViewController:a animated:YES completion:nil];
+        return;
+    }
 
     NSDictionary *p = @{@"localUrl": localPath,
                         @"index": @(gIndex),
@@ -281,7 +323,12 @@ static NSString *FindRFSInDir(NSString *dir) {
 
 __attribute__((constructor)) static void TPInit(void) {
     gLog = os_log_create("com.rev.themepush", "general");
-    os_log(gLog, "ThemePush 1.0 已加载（fileTransfer + fileSet）");
+    os_log(gLog, "ThemePush 1.1 已加载（捕获真实 RN 模块，禁自建）");
+    // 立刻挂捕获钩子 —— 必须早于 RN bridge 创建模块
+    CaptureInit(NSClassFromString(@"_TtC7Vehicle19RNFileManagerModule"), NO);
+    CaptureInit(NSClassFromString(@"Vehicle.RNFileManagerModule"), NO);
+    CaptureInit(NSClassFromString(@"_TtC7Vehicle12RNBleModule"), YES);
+    CaptureInit(NSClassFromString(@"Vehicle.RNBleModule"), YES);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         Class fm = NSClassFromString(@"_TtC7Vehicle19RNFileManagerModule");
