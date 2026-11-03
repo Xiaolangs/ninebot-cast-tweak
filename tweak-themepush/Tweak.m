@@ -190,6 +190,51 @@ static void SendFileTransfer(NSString *localPath) {
         return;
     }
 
+    // iOS 的 RNFileManagerModule 第一参数是 binContent（安卓才是 localUrl），
+    // 两个都给，读哪个都能拿到。
+    NSData *fileData = [NSData dataWithContentsOfFile:localPath];
+    NSString *b64 = [fileData base64EncodedStringWithOptions:0] ?: @"";
+    os_log(gLog, "[TP] binContent base64 长度 %lu（原始 %lu B）",
+           (unsigned long)b64.length, (unsigned long)fileData.length);
+
+    NSDictionary *p = @{@"localUrl": localPath,
+                        @"binContent": b64,
+                        @"index": @(gIndex),
+                        @"module": gModuleName,
+                        @"fileCode": @(gFileCode),
+                        @"fileVersion": @(gFileVersion),
+                        @"addHeader": @NO,
+                        @"transferProtocol": @(gProtocol),
+                        @"channel": @(gChannel),
+                        @"instrumentType": @(gInstrument),
+                        @"customLength": @(-1)};
+    NSData *j = [NSJSONSerialization dataWithJSONObject:p options:0 error:nil];
+    NSString *s = [[NSString alloc] initWithData:j encoding:NSUTF8StringEncoding];
+    os_log(gLog, "[TP] → fileSet %{public}s", s.UTF8String);
+
+    SEL sel = NSSelectorFromString(@"writeBleModuleCmdResponse:");
+    if (![gBleModule respondsToSelector:sel]) { os_log(gLog, "[TP] ❌ 无 writeBleModuleCmdResponse:"); return; }
+    id mod = gBleModule; NSString *payload = s;
+    RunOnModuleQueue(mod, ^{
+        @try { ((void(*)(id,SEL,id))objc_msgSend)(mod, sel, payload); }
+        @catch (NSException *e) { os_log(gLog, "[TP] fileSet 异常: %{public}s", e.reason.UTF8String); }
+    });
+}
+
+static void SendFileTransfer(NSString *localPath) {
+    if (!InspectFile(localPath)) return;
+    gFileModule = FindRNModule(@"_TtC7Vehicle19RNFileManagerModule", NO);
+    if (!gFileModule) gFileModule = FindRNModule(@"Vehicle.RNFileManagerModule", NO);
+    if (!gFileModule) {
+        os_log(gLog, "[TP] ❌ 尚未捕获到 RNFileManagerModule 实例（拒绝自建，避免闪退）");
+        UIAlertController *a = [UIAlertController alertControllerWithTitle:@"模块未就绪"
+            message:@"请先进入「主题中心」浏览一次，让 RN 创建文件传输模块后重试"
+            preferredStyle:UIAlertControllerStyleAlert];
+        [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
+        [TopVC() presentViewController:a animated:YES completion:nil];
+        return;
+    }
+
     NSDictionary *p = @{@"localUrl": localPath,
                         @"index": @(gIndex),
                         @"module": gModuleName,
@@ -454,7 +499,7 @@ static void InstallRecorders(void) {
 
 __attribute__((constructor)) static void TPInit(void) {
     gLog = os_log_create("com.rev.themepush", "general");
-    os_log(gLog, "ThemePush 1.5 已加载（methodQueue 调用 + 文件体检）");
+    os_log(gLog, "ThemePush 1.6 已加载（改用 binContent 传文件内容）");
     // 立刻挂捕获钩子 —— 必须早于 RN bridge 创建模块
     CaptureInit(NSClassFromString(@"_TtC7Vehicle19RNFileManagerModule"), NO);
     CaptureInit(NSClassFromString(@"Vehicle.RNFileManagerModule"), NO);
@@ -465,6 +510,13 @@ __attribute__((constructor)) static void TPInit(void) {
                    dispatch_get_main_queue(), ^{
         Class fm = NSClassFromString(@"_TtC7Vehicle19RNFileManagerModule");
         Class bm = NSClassFromString(@"_TtC7Vehicle11RNBleModule");
+        if (fm) {
+            unsigned int n = 0; Method *ms = class_copyMethodList(fm, &n);
+            NSMutableString *ml = [NSMutableString string];
+            for (unsigned int i = 0; i < n; i++) [ml appendFormat:@"%s  ", sel_getName(method_getName(ms[i]))];
+            free(ms);
+            os_log(gLog, "[TP] RNFileManagerModule 方法(%u): %{public}s", n, ml.UTF8String);
+        }
         os_log(gLog, "[TP] RNFileManagerModule=%{public}s RNBleModule=%{public}s",
                fm ? "有" : "无", bm ? "有" : "无");
         [[TPButton shared] install];
