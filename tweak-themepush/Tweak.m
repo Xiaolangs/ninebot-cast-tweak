@@ -280,11 +280,11 @@ static NSString *FindRFSInDir(NSString *dir) {
         }
     }
     // 从文件名自动取资源码/版本（文件名本身就是 <code>_<ver>.rfs）
-    NSInteger c = 0, v = 0;
-    if (ParseRFSName(target.lastPathComponent, &c, &v)) {
-        gFileCode = c; gFileVersion = v;
+    NSInteger rc = 0, rv = 0;
+    if (ParseRFSName(target.lastPathComponent, &rc, &rv)) {
+        gFileCode = rc; gFileVersion = rv;
         os_log(gLog, "[TP] 自动识别 code=0x%lX(%ld) ver=0x%lX(%ld)  来自文件名 %{public}s",
-               (long)c, (long)c, (long)v, (long)v, target.lastPathComponent.UTF8String);
+               (long)rc, (long)rc, (long)rv, (long)rv, target.lastPathComponent.UTF8String);
     } else {
         os_log(gLog, "[TP] ⚠️ 文件名不符合 <code>_<ver>.rfs，改为手动填写");
         AskParamsThenSend(target);
