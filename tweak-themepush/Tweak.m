@@ -173,6 +173,55 @@ static void SendFileTransfer(NSString *localPath) {
     @catch (NSException *e) { os_log(gLog, "[TP] fileTransfer 异常: %{public}s", e.reason.UTF8String); }
 }
 
+#pragma mark - 从文件名解析资源码/版本
+
+// 主题包内 .rfs 命名规范：<资源码8位HEX>_<版本4位HEX>.rfs
+// 例：0000016b_0371.rfs  →  fileCode=0x16B(363)  fileVersion=0x371(881)
+static BOOL ParseRFSName(NSString *fileName, NSInteger *code, NSInteger *ver) {
+    NSString *base = fileName.stringByDeletingPathExtension;
+    NSArray *parts = [base componentsSeparatedByString:@"_"];
+    if (parts.count < 2) return NO;
+    NSCharacterSet *hexSet = [NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdefABCDEF"];
+    NSString *a = parts[0], *b = parts[1];
+    if (a.length == 0 || b.length == 0) return NO;
+    if ([a stringByTrimmingCharactersInSet:hexSet].length) return NO;
+    if ([b stringByTrimmingCharactersInSet:hexSet].length) return NO;
+    unsigned long long c = 0, v = 0;
+    if (![[NSScanner scannerWithString:a] scanHexLongLong:&c]) return NO;
+    if (![[NSScanner scannerWithString:b] scanHexLongLong:&v]) return NO;
+    *code = (NSInteger)c; *ver = (NSInteger)v;
+    return YES;
+}
+
+// 解析不出来时，让用户手填（预填当前值）
+static void AskParamsThenSend(NSString *path) {
+    UIAlertController *a = [UIAlertController
+        alertControllerWithTitle:@"填写资源信息"
+        message:[NSString stringWithFormat:@"文件名无法解析：%@\n请输入十六进制资源码与版本", path.lastPathComponent]
+        preferredStyle:UIAlertControllerStyleAlert];
+    [a addTextFieldWithConfigurationHandler:^(UITextField *t) {
+        t.placeholder = @"fileCode (HEX)";
+        t.text = [NSString stringWithFormat:@"%lX", (long)gFileCode];
+        t.autocapitalizationType = UITextAutocapitalizationTypeAllCharacters;
+    }];
+    [a addTextFieldWithConfigurationHandler:^(UITextField *t) {
+        t.placeholder = @"fileVersion (HEX)";
+        t.text = [NSString stringWithFormat:@"%lX", (long)gFileVersion];
+        t.autocapitalizationType = UITextAutocapitalizationTypeAllCharacters;
+    }];
+    [a addAction:[UIAlertAction actionWithTitle:@"发送" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *x) {
+        NSInteger c = 0, v = 0;
+        [[NSScanner scannerWithString:a.textFields[0].text] scanHexLongLong:(unsigned long long *)&c];
+        [[NSScanner scannerWithString:a.textFields[1].text] scanHexLongLong:(unsigned long long *)&v];
+        gFileCode = c; gFileVersion = v;
+        os_log(gLog, "[TP] 手动设定 code=0x%lX(%ld) ver=0x%lX(%ld)",
+               (long)gFileCode, (long)gFileCode, (long)gFileVersion, (long)gFileVersion);
+        SendFileTransfer(path);
+    }]];
+    [a addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [TopVC() presentViewController:a animated:YES completion:nil];
+}
+
 #pragma mark - 解压（zip 里找 .rfs）
 
 static NSString *FindRFSInDir(NSString *dir) {
@@ -229,6 +278,17 @@ static NSString *FindRFSInDir(NSString *dir) {
         } else {
             os_log(gLog, "[TP] ⚠️ 只接受 .rfs。请把主题包解压后选其中的 .rfs（iOS 不内置解压）");
         }
+    }
+    // 从文件名自动取资源码/版本（文件名本身就是 <code>_<ver>.rfs）
+    NSInteger c = 0, v = 0;
+    if (ParseRFSName(target.lastPathComponent, &c, &v)) {
+        gFileCode = c; gFileVersion = v;
+        os_log(gLog, "[TP] 自动识别 code=0x%lX(%ld) ver=0x%lX(%ld)  来自文件名 %{public}s",
+               (long)c, (long)c, (long)v, (long)v, target.lastPathComponent.UTF8String);
+    } else {
+        os_log(gLog, "[TP] ⚠️ 文件名不符合 <code>_<ver>.rfs，改为手动填写");
+        AskParamsThenSend(target);
+        return;
     }
     SendFileTransfer(target);
 }
@@ -354,7 +414,7 @@ static void InstallRecorders(void) {
 
 __attribute__((constructor)) static void TPInit(void) {
     gLog = os_log_create("com.rev.themepush", "general");
-    os_log(gLog, "ThemePush 1.3 已加载（fileSet 补 timeOut=5000 + 录制 App 调用）");
+    os_log(gLog, "ThemePush 1.4 已加载（从文件名自动解析 fileCode/fileVersion）");
     // 立刻挂捕获钩子 —— 必须早于 RN bridge 创建模块
     CaptureInit(NSClassFromString(@"_TtC7Vehicle19RNFileManagerModule"), NO);
     CaptureInit(NSClassFromString(@"Vehicle.RNFileManagerModule"), NO);
