@@ -65,9 +65,9 @@ static void DumpMethods(const char *clsName) {
 
 static NSArray<NSString *> *SandboxDirs(void) {
     NSMutableArray *a = [NSMutableArray array];
-    NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
-    NSString *lib  = NSSearchPathForDirectoriesInDomains(NSLibraryDirectory, NSUserDomainMask, YES).firstObject;
-    NSString *caches = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES).firstObject;
+    NSString *docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+    NSString *lib  = [NSSearchPathForDirectoriesInDomains(NSLibraryDirectory, NSUserDomainMask, YES) firstObject];
+    NSString *caches = [NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES) firstObject];
     for (NSString *p in @[docs ?: @"", lib ?: @"", caches ?: @"", NSTemporaryDirectory() ?: @""])
         if (p.length) [a addObject:p];
     return a;
@@ -159,7 +159,7 @@ static void ApplyLocalSkin(NSString *path) {
     if (!u) return;
     os_log(gLog, "[TA] 选中文件: %{public}s", u.absoluteString.UTF8String);
 
-    NSString *dir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject];
+    NSString *dir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
     dir = [dir stringByAppendingPathComponent:@"ThemeLocal"];
     [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
     NSString *dst = [dir stringByAppendingPathComponent:u.lastPathComponent];

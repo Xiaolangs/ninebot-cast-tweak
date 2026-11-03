@@ -15,9 +15,6 @@
 static os_log_t gLog = NULL;
 static int gN = 0;
 
-// 已知 .nb 解码后尺寸（用于识别）
-static const size_t kSizes[] = {62144, 18880, 2944, 976, 82860};
-
 static void HexLog(const char *tag, const void *p, size_t n, size_t cap) {
     if (!p || !n) { os_log(gLog, "[NB] %{public}s=(null)", tag); return; }
     size_t m = n < cap ? n : cap;
