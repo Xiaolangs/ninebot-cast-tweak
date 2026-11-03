@@ -105,7 +105,7 @@ static id FindRNModule(NSString *clsName, BOOL isBle) {
 #pragma mark - 两步
 
 static void SendFileSet(void) {
-    gBleModule = FindRNModule(@"_TtC7Vehicle12RNBleModule", YES);
+    gBleModule = FindRNModule(@"_TtC7Vehicle11RNBleModule", YES);
     if (!gBleModule) gBleModule = FindRNModule(@"Vehicle.RNBleModule", YES);
     if (!gBleModule) {
         os_log(gLog, "[TP] ❌ 尚未捕获到 RNBleModule 实例");
@@ -323,16 +323,16 @@ static NSString *FindRFSInDir(NSString *dir) {
 
 __attribute__((constructor)) static void TPInit(void) {
     gLog = os_log_create("com.rev.themepush", "general");
-    os_log(gLog, "ThemePush 1.1 已加载（捕获真实 RN 模块，禁自建）");
+    os_log(gLog, "ThemePush 1.2 已加载（修正 RNBleModule 类名）");
     // 立刻挂捕获钩子 —— 必须早于 RN bridge 创建模块
     CaptureInit(NSClassFromString(@"_TtC7Vehicle19RNFileManagerModule"), NO);
     CaptureInit(NSClassFromString(@"Vehicle.RNFileManagerModule"), NO);
-    CaptureInit(NSClassFromString(@"_TtC7Vehicle12RNBleModule"), YES);
+    CaptureInit(NSClassFromString(@"_TtC7Vehicle11RNBleModule"), YES);
     CaptureInit(NSClassFromString(@"Vehicle.RNBleModule"), YES);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         Class fm = NSClassFromString(@"_TtC7Vehicle19RNFileManagerModule");
-        Class bm = NSClassFromString(@"_TtC7Vehicle12RNBleModule");
+        Class bm = NSClassFromString(@"_TtC7Vehicle11RNBleModule");
         os_log(gLog, "[TP] RNFileManagerModule=%{public}s RNBleModule=%{public}s",
                fm ? "有" : "无", bm ? "有" : "无");
         [[TPButton shared] install];
