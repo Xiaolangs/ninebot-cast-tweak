@@ -21,6 +21,7 @@ on:
       - 'tweak-themeapply/**'
       - 'tweak-themepush/**'
       - 'tweak-agshim/**'
+      - 'tweak-noyidun/**'
       - '.github/workflows/build-dylib.yml'
   pull_request:
   workflow_dispatch:
@@ -618,4 +619,34 @@ jobs:
         with:
           name: AppGroupShim
           path: out/AppGroupShim.dylib
+          if-no-files-found: error
+
+  build-noyidun:
+    name: NoYidun build
+    runs-on: macos-14
+    env:
+      THEOS: ${{ github.workspace }}/theos
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Theos
+        run: |
+          set -euo pipefail
+          if [ ! -f "$THEOS/makefiles/common.mk" ] || [ ! -f "$THEOS/bin/logos.pl" ]; then
+            rm -rf "$THEOS"; git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
+          fi
+      - name: Install ldid
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install ldid || true
+      - name: Build NoYidun
+        working-directory: tweak-noyidun
+        run: |
+          set -euo pipefail
+          make
+          D=$(find .theos -name 'NoYidun.dylib' | head -1); test -n "$D"
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp "$D" "$GITHUB_WORKSPACE/out/NoYidun.dylib"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NoYidun
+          path: out/NoYidun.dylib
           if-no-files-found: error
