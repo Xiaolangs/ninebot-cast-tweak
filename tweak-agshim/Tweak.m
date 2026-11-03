@@ -27,8 +27,11 @@ static int gGroupHit = 0, gSuiteHit = 0, gKeychainHit = 0;
 
 static NSURL *(*gOrigContainerURL)(id, SEL, NSString *) = NULL;
 
+static int gAnyContainer = 0;
 static NSURL *MyContainerURL(id self, SEL _cmd, NSString *gid) {
-    if ([gid isEqualToString:kGroup]) {
+    if (gAnyContainer++ < 12)
+        os_log(gLog, "[AGS] ① 被调用 gid=%{public}s", gid ? gid.UTF8String : "(nil)");
+    if (gid && [gid isEqualToString:kGroup]) {
         NSString *docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
         NSString *dir = [docs stringByAppendingPathComponent:kShimDir];
         [[NSFileManager defaultManager] createDirectoryAtPath:dir
@@ -44,7 +47,10 @@ static NSURL *MyContainerURL(id self, SEL _cmd, NSString *gid) {
 
 static id (*gOrigInitSuite)(id, SEL, NSString *) = NULL;
 
+static int gAnySuite = 0;
 static id MyInitSuite(id self, SEL _cmd, NSString *suite) {
+    if (gAnySuite++ < 12)
+        os_log(gLog, "[AGS] ② 被调用 suite=%{public}s", suite ? suite.UTF8String : "(nil)");
     if (suite && [suite isEqualToString:kGroup]) {
         if (gSuiteHit++ < 5)
             os_log(gLog, "[AGS] ② UserDefaults suite 替换 %{public}s → %{public}s",
@@ -78,9 +84,13 @@ static OSStatus MySecItemAdd(CFDictionaryRef attrs, CFTypeRef *result) {
     if (q) CFRelease(q);
     return st;
 }
+static int gKmHit = 0;
 static OSStatus MySecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
     CFDictionaryRef q = StripAccessGroup(query);
     OSStatus st = SecItemCopyMatching(q, result);
+    if (gKmHit++ < 8)
+        os_log(gLog, "[AGS] ③ Keychain Copy status=%d %{public}s", (int)st,
+               st == errSecSuccess ? "有数据" : (st == errSecItemNotFound ? "无数据" : "其他"));
     if (q) CFRelease(q);
     return st;
 }
@@ -111,7 +121,7 @@ __attribute__((used)) static struct {
 
 __attribute__((constructor)) static void AGSInit(void) {
     gLog = os_log_create("com.rev.agshim", "general");
-    os_log(gLog, "AppGroupShim 1.0 已加载（group=%{public}s）", kGroup.UTF8String);
+    os_log(gLog, "AppGroupShim 1.1 已加载（group=%{public}s）", kGroup.UTF8String);
 
     Class fmc = objc_getClass("NSFileManager");
     SEL cs = sel_registerName("containerURLForSecurityApplicationGroupIdentifier:");
