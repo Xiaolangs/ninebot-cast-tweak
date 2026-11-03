@@ -102,6 +102,39 @@ static id FindRNModule(NSString *clsName, BOOL isBle) {
     return nil;
 }
 
+#pragma mark - 安全调用（RN 模块必须在其 methodQueue 上调用）
+
+static void RunOnModuleQueue(id module, dispatch_block_t block) {
+    dispatch_queue_t q = nil;
+    SEL sel = NSSelectorFromString(@"methodQueue");
+    if (module && [module respondsToSelector:sel]) {
+        @try { q = ((dispatch_queue_t (*)(id, SEL))objc_msgSend)(module, sel); } @catch (__unused NSException *e) {}
+    }
+    if (q) {
+        os_log(gLog, "[TP] 在模块 methodQueue 上执行");
+        dispatch_async(q, block);
+    } else {
+        os_log(gLog, "[TP] 无 methodQueue，退回主线程");
+        dispatch_async(dispatch_get_main_queue(), block);
+    }
+}
+
+// 文件体检：大小 + 头部十六进制，过小直接拦下（避免 Swift 强解包崩溃）
+static BOOL InspectFile(NSString *path) {
+    NSData *d = [NSData dataWithContentsOfFile:path];
+    if (!d) { os_log(gLog, "[TP] ❌ 读不到文件"); return NO; }
+    NSUInteger n = d.length;
+    NSMutableString *hex = [NSMutableString string];
+    const uint8_t *b = d.bytes;
+    for (NSUInteger i = 0; i < MIN((NSUInteger)24, n); i++) [hex appendFormat:@"%02x", b[i]];
+    os_log(gLog, "[TP] 文件 %lu B  头部=%{public}s", (unsigned long)n, hex.UTF8String);
+    if (n < 64) {
+        os_log(gLog, "[TP] ❌ 文件仅 %lu 字节，不可能是有效 .rfs，已中止", (unsigned long)n);
+        return NO;
+    }
+    return YES;
+}
+
 #pragma mark - 两步
 
 static void SendFileSet(void) {
@@ -136,11 +169,15 @@ static void SendFileSet(void) {
 
     SEL sel = NSSelectorFromString(@"writeBleModuleCmdResponse:");
     if (![gBleModule respondsToSelector:sel]) { os_log(gLog, "[TP] ❌ 无 writeBleModuleCmdResponse:"); return; }
-    @try { ((void(*)(id,SEL,id))objc_msgSend)(gBleModule, sel, s); }
-    @catch (NSException *e) { os_log(gLog, "[TP] fileSet 异常: %{public}s", e.reason.UTF8String); }
+    id mod = gBleModule; NSString *payload = s;
+    RunOnModuleQueue(mod, ^{
+        @try { ((void(*)(id,SEL,id))objc_msgSend)(mod, sel, payload); }
+        @catch (NSException *e) { os_log(gLog, "[TP] fileSet 异常: %{public}s", e.reason.UTF8String); }
+    });
 }
 
 static void SendFileTransfer(NSString *localPath) {
+    if (!InspectFile(localPath)) return;
     gFileModule = FindRNModule(@"_TtC7Vehicle19RNFileManagerModule", NO);
     if (!gFileModule) gFileModule = FindRNModule(@"Vehicle.RNFileManagerModule", NO);
     if (!gFileModule) {
@@ -169,8 +206,11 @@ static void SendFileTransfer(NSString *localPath) {
 
     SEL sel = NSSelectorFromString(@"fileTransfer:");
     if (![gFileModule respondsToSelector:sel]) { os_log(gLog, "[TP] ❌ 无 fileTransfer:"); return; }
-    @try { ((void(*)(id,SEL,id))objc_msgSend)(gFileModule, sel, s); }
-    @catch (NSException *e) { os_log(gLog, "[TP] fileTransfer 异常: %{public}s", e.reason.UTF8String); }
+    id mod = gFileModule; NSString *payload = s;
+    RunOnModuleQueue(mod, ^{
+        @try { ((void(*)(id,SEL,id))objc_msgSend)(mod, sel, payload); }
+        @catch (NSException *e) { os_log(gLog, "[TP] fileTransfer 异常: %{public}s", e.reason.UTF8String); }
+    });
 }
 
 #pragma mark - 从文件名解析资源码/版本
@@ -414,7 +454,7 @@ static void InstallRecorders(void) {
 
 __attribute__((constructor)) static void TPInit(void) {
     gLog = os_log_create("com.rev.themepush", "general");
-    os_log(gLog, "ThemePush 1.4 已加载（从文件名自动解析 fileCode/fileVersion）");
+    os_log(gLog, "ThemePush 1.5 已加载（methodQueue 调用 + 文件体检）");
     // 立刻挂捕获钩子 —— 必须早于 RN bridge 创建模块
     CaptureInit(NSClassFromString(@"_TtC7Vehicle19RNFileManagerModule"), NO);
     CaptureInit(NSClassFromString(@"Vehicle.RNFileManagerModule"), NO);
