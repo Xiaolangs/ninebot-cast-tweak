@@ -174,20 +174,17 @@ static NSString *FindRFSInDir(NSString *dir) {
     if (!ok) { os_log(gLog, "[TP] ❌ 拷贝失败 %{public}s", err.localizedDescription.UTF8String); return; }
 
     os_log(gLog, "[TP] 已保存 %{public}s", dst.lastPathComponent.UTF8String);
-    NSString *target = dst;
 
-    if ([dst.pathExtension.lowercaseString isEqualToString:@"zip"]) {
-        NSString *out = [dir stringByAppendingPathComponent:@"unzipped"];
-        [NSFileManager.defaultManager removeItemAtPath:out error:nil];
-        [NSFileManager.defaultManager createDirectoryAtPath:out withIntermediateDirectories:YES attributes:nil error:nil];
-        NSData *zip = [NSData dataWithContentsOfFile:dst];
-        NSString *errMsg = nil;
-        // 用系统 unzip（iOS 无公开 API，退化为提示用户选 .rfs）
-        os_log(gLog, "[TP] zip 大小 %lu B，请直接选择解压后的 .rfs（iOS 不便于内部解压）",
-               (unsigned long)zip.length);
-        os_log(gLog, "[TP] 提示：把 zip 解压后选其中的 .rfs 文件即可");
-        target = dst;  // 仍尝试发送原文件
-        (void)errMsg;
+    // 选中的不是 .rfs 时，尝试在 ThemePush 目录里找现成的 .rfs
+    NSString *target = dst;
+    if (![dst.pathExtension.lowercaseString isEqualToString:@"rfs"]) {
+        NSString *found = FindRFSInDir(dir);
+        if (found) {
+            os_log(gLog, "[TP] 选中非 .rfs，改用已存在的 %{public}s", found.lastPathComponent.UTF8String);
+            target = found;
+        } else {
+            os_log(gLog, "[TP] ⚠️ 只接受 .rfs。请把主题包解压后选其中的 .rfs（iOS 不内置解压）");
+        }
     }
     SendFileTransfer(target);
 }
