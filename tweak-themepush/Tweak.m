@@ -142,11 +142,6 @@ static void SendFileSet(void) {
     if (!gBleModule) gBleModule = FindRNModule(@"Vehicle.RNBleModule", YES);
     if (!gBleModule) {
         os_log(gLog, "[TP] ❌ 尚未捕获到 RNBleModule 实例");
-        UIAlertController *a = [UIAlertController alertControllerWithTitle:@"模块未就绪"
-            message:@"请先进入「主题中心」浏览一次，再重试"
-            preferredStyle:UIAlertControllerStyleAlert];
-        [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
-        [TopVC() presentViewController:a animated:YES completion:nil];
         return;
     }
 
@@ -156,7 +151,7 @@ static void SendFileSet(void) {
     for (int i = 0; i < 4; i++) [data addObject:@((code >> (i * 8)) & 0xFF)];
     for (int i = 0; i < 2; i++) [data addObject:@((ver  >> (i * 8)) & 0xFF)];
 
-    // 799 指令集: dis,fileSet,write,s_index=1,s_cmd=139,r_cmd=139,proto=5AA5,timeout=5000
+    // 799: dis,fileSet,write,s_index=1,s_cmd=139,r_cmd=139,proto=5AA5,timeout=5000
     NSDictionary *p = @{@"moduleName": gModuleName,
                         @"cmd": @"fileSet",
                         @"index": [NSString stringWithFormat:@"%ld", (long)gIndex],
@@ -175,6 +170,8 @@ static void SendFileSet(void) {
     });
 }
 
+// iOS RNFileManagerModule 只解析这 9 个键（二进制字符串池确认）：
+//   binContent index module fileCode fileVersion channel transferProtocol customLength instrumentType
 static void SendFileTransfer(NSString *localPath) {
     if (!InspectFile(localPath)) return;
 
@@ -182,23 +179,16 @@ static void SendFileTransfer(NSString *localPath) {
     if (!gFileModule) gFileModule = FindRNModule(@"Vehicle.RNFileManagerModule", NO);
     if (!gFileModule) {
         os_log(gLog, "[TP] ❌ 尚未捕获到 RNFileManagerModule 实例");
-        UIAlertController *a = [UIAlertController alertControllerWithTitle:@"模块未就绪"
-            message:@"请先进入「主题中心」浏览一次，再重试"
-            preferredStyle:UIAlertControllerStyleAlert];
-        [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
-        [TopVC() presentViewController:a animated:YES completion:nil];
         return;
     }
 
-    // iOS 模块只解析这些键（从二进制字符串池确认）：
-    //   binContent index module fileCode fileVersion channel transferProtocol customLength instrumentType
     NSData *fileData = [NSData dataWithContentsOfFile:localPath];
     NSMutableDictionary *p = [NSMutableDictionary dictionary];
     if (gBinAsPath) {
-        p[@"binContent"] = localPath;                 // 模式B：传路径
+        p[@"binContent"] = localPath;
         os_log(gLog, "[TP] binContent 模式=路径 %{public}s", localPath.lastPathComponent.UTF8String);
     } else {
-        p[@"binContent"] = [fileData base64EncodedStringWithOptions:0] ?: @"";  // 模式A：传 base64
+        p[@"binContent"] = [fileData base64EncodedStringWithOptions:0] ?: @"";
         os_log(gLog, "[TP] binContent 模式=base64 长度 %lu（原始 %lu B）",
                (unsigned long)[(NSString *)p[@"binContent"] length], (unsigned long)fileData.length);
     }
@@ -213,59 +203,15 @@ static void SendFileTransfer(NSString *localPath) {
 
     NSData *j = [NSJSONSerialization dataWithJSONObject:p options:0 error:nil];
     NSString *payload = [[NSString alloc] initWithData:j encoding:NSUTF8StringEncoding];
-    os_log(gLog, "[TP] → fileSet %{public}s", payload.UTF8String);
-
-    SEL sel = NSSelectorFromString(@"writeBleModuleCmdResponse:");
-    if (![gBleModule respondsToSelector:sel]) { os_log(gLog, "[TP] ❌ 无 writeBleModuleCmdResponse:"); return; }
-    id mod = gBleModule;
-    RunOnModuleQueue(mod, ^{
-        @try { ((void (*)(id, SEL, id))objc_msgSend)(mod, sel, payload); }
-        @catch (NSException *e) { os_log(gLog, "[TP] fileSet 异常: %{public}s", e.reason.UTF8String); }
-    });
-}
-
-static void SendFileTransfer(NSString *localPath) {
-    if (!InspectFile(localPath)) return;
-
-    gFileModule = FindRNModule(@"_TtC7Vehicle19RNFileManagerModule", NO);
-    if (!gFileModule) gFileModule = FindRNModule(@"Vehicle.RNFileManagerModule", NO);
-    if (!gFileModule) {
-        os_log(gLog, "[TP] ❌ 尚未捕获到 RNFileManagerModule 实例");
-        UIAlertController *a = [UIAlertController alertControllerWithTitle:@"模块未就绪"
-            message:@"请先进入「主题中心」浏览一次，再重试"
-            preferredStyle:UIAlertControllerStyleAlert];
-        [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
-        [TopVC() presentViewController:a animated:YES completion:nil];
-        return;
-    }
-
-    // iOS 的 RNFileManagerModule 第一参数是 binContent（安卓才是 localUrl），两者都给。
-    NSData *fileData = [NSData dataWithContentsOfFile:localPath];
-    NSString *b64 = [fileData base64EncodedStringWithOptions:0] ?: @"";
-    os_log(gLog, "[TP] binContent base64 长度 %lu（原始 %lu B）",
-           (unsigned long)b64.length, (unsigned long)fileData.length);
-
-    NSDictionary *p = @{@"localUrl": localPath,
-                        @"binContent": b64,
-                        @"index": @(gIndex),
-                        @"module": gModuleName,
-                        @"fileCode": @(gFileCode),
-                        @"fileVersion": @(gFileVersion),
-                        @"addHeader": @NO,
-                        @"transferProtocol": @(gProtocol),
-                        @"channel": @(gChannel),
-                        @"instrumentType": @(gInstrument),
-                        @"customLength": @(-1)};
-    NSData *j = [NSJSONSerialization dataWithJSONObject:p options:0 error:nil];
-    NSString *payload = [[NSString alloc] initWithData:j encoding:NSUTF8StringEncoding];
-    os_log(gLog, "[TP] → fileTransfer code=%ld ver=%ld index=%ld channel=%ld module=%{public}s",
-           (long)gFileCode, (long)gFileVersion, (long)gIndex, (long)gChannel, gModuleName.UTF8String);
+    os_log(gLog, "[TP] → fileTransfer code=%ld ver=%ld idx=%ld ch=%ld proto=%ld inst=%ld module=%{public}s",
+           (long)gFileCode, (long)gFileVersion, (long)gIndex, (long)gChannel,
+           (long)gProtocol, (long)gInstrument, gModuleName.UTF8String);
 
     SEL sel = NSSelectorFromString(@"fileTransfer:");
     if (![gFileModule respondsToSelector:sel]) { os_log(gLog, "[TP] ❌ 无 fileTransfer:"); return; }
     id mod = gFileModule;
     RunOnModuleQueue(mod, ^{
-        @try { ((void(*)(id, SEL, id))objc_msgSend)(mod, sel, payload); }
+        @try { ((void (*)(id, SEL, id))objc_msgSend)(mod, sel, payload); }
         @catch (NSException *e) { os_log(gLog, "[TP] fileTransfer 异常: %{public}s", e.reason.UTF8String); }
     });
 }
