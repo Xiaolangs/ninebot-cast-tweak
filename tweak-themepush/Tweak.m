@@ -137,8 +137,6 @@ static BOOL InspectFile(NSString *path) {
     return YES;
 }
 
-static void ContinueTransfer(NSString *localPath);
-
 #pragma mark - 车辆连接检测（避免 "zwx device is nil" 崩溃）
 
 // 返回 1=已连接  0=未连接  -1=无法判断
@@ -208,50 +206,6 @@ static void SendFileSet(void) {
 // iOS RNFileManagerModule 只解析这 9 个键（二进制字符串池确认）：
 //   binContent index module fileCode fileVersion channel transferProtocol customLength instrumentType
 static void SendFileTransfer(NSString *localPath);
-
-static void ContinueTransfer(NSString *localPath) {
-    gFileModule = FindRNModule(@"_TtC7Vehicle19RNFileManagerModule", NO);
-    if (!gFileModule) gFileModule = FindRNModule(@"Vehicle.RNFileManagerModule", NO);
-    if (!gFileModule) { os_log(gLog, "[TP] ❌ 无 RNFileManagerModule"); return; }
-    NSData *fileData = [NSData dataWithContentsOfFile:localPath];
-    NSMutableDictionary *p = [NSMutableDictionary dictionary];
-    if (gBinAsPath) {
-        p[@"binContent"] = localPath;
-        os_log(gLog, "[TP] binContent 模式=路径");
-    } else {
-        p[@"binContent"] = [fileData base64EncodedStringWithOptions:0] ?: @"";
-        os_log(gLog, "[TP] binContent 模式=base64 长度 %lu", (unsigned long)[(NSString *)p[@"binContent"] length]);
-    }
-    p[@"index"]            = @(gIndex);
-    p[@"module"]           = gModuleName;
-    p[@"fileCode"]         = @(gFileCode);
-    p[@"fileVersion"]      = @(gFileVersion);
-    p[@"channel"]          = @(gChannel);
-    p[@"transferProtocol"] = @(gProtocol);
-    p[@"customLength"]     = @(-1);
-    p[@"instrumentType"]   = @(gInstrument);
-    NSData *j = [NSJSONSerialization dataWithJSONObject:p options:0 error:nil];
-    NSString *payload = [[NSString alloc] initWithData:j encoding:NSUTF8StringEncoding];
-    os_log(gLog, "[TP] → fileTransfer code=%ld ver=%ld idx=%ld inst=%ld",
-           (long)gFileCode, (long)gFileVersion, (long)gIndex, (long)gInstrument);
-    SEL sel = NSSelectorFromString(@"fileTransfer:");
-    if (![gFileModule respondsToSelector:sel]) { os_log(gLog, "[TP] ❌ 无 fileTransfer:"); return; }
-    id mod = gFileModule;
-    // 模拟 RN 的 JS 线程：独立串行后台队列（官方调用就在这条线上）
-    static dispatch_queue_t jsQ;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        jsQ = dispatch_queue_create("com.rev.themepush.js", DISPATCH_QUEUE_SERIAL);
-    });
-    dispatch_async(jsQ, ^{
-        @autoreleasepool {
-            gOurCall = YES;
-            os_log(gLog, "[TP] 在后台 JS 队列调用 fileTransfer");
-            @try { ((void (*)(id, SEL, id))objc_msgSend)(mod, sel, payload); }
-            @catch (NSException *e) { os_log(gLog, "[TP] fileTransfer 异常: %{public}s", e.reason.UTF8String); }
-        }
-    });
-}
 
 static void SendFileTransfer(NSString *localPath) {
     if (!InspectFile(localPath)) return;
