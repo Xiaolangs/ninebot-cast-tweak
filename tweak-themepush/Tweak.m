@@ -26,7 +26,8 @@ static NSInteger gFileVersion = 0x371;
 static NSInteger gIndex       = 1;      // 资源域：仪表=1
 static NSInteger gChannel     = 1;      // 1=BLE 2=WiFi
 static NSInteger gProtocol    = 1;
-static NSInteger gInstrument  = 2;
+static NSInteger gInstrument  = 6;   // F43(4.3寸)仪表 = 6（API: instrumentTypeId="6"）
+static BOOL      gBinAsPath    = NO;  // NO=base64 传内容  YES=传沙盒路径
 static NSString *gModuleName  = @"tft";
 
 #pragma mark - 基础
@@ -161,6 +162,55 @@ static void SendFileSet(void) {
                         @"index": [NSString stringWithFormat:@"%ld", (long)gIndex],
                         @"data": data,
                         @"timeOut": @5000};
+    NSData *j = [NSJSONSerialization dataWithJSONObject:p options:0 error:nil];
+    NSString *payload = [[NSString alloc] initWithData:j encoding:NSUTF8StringEncoding];
+    os_log(gLog, "[TP] → fileSet %{public}s", payload.UTF8String);
+
+    SEL sel = NSSelectorFromString(@"writeBleModuleCmdResponse:");
+    if (![gBleModule respondsToSelector:sel]) { os_log(gLog, "[TP] ❌ 无 writeBleModuleCmdResponse:"); return; }
+    id mod = gBleModule;
+    RunOnModuleQueue(mod, ^{
+        @try { ((void (*)(id, SEL, id))objc_msgSend)(mod, sel, payload); }
+        @catch (NSException *e) { os_log(gLog, "[TP] fileSet 异常: %{public}s", e.reason.UTF8String); }
+    });
+}
+
+static void SendFileTransfer(NSString *localPath) {
+    if (!InspectFile(localPath)) return;
+
+    gFileModule = FindRNModule(@"_TtC7Vehicle19RNFileManagerModule", NO);
+    if (!gFileModule) gFileModule = FindRNModule(@"Vehicle.RNFileManagerModule", NO);
+    if (!gFileModule) {
+        os_log(gLog, "[TP] ❌ 尚未捕获到 RNFileManagerModule 实例");
+        UIAlertController *a = [UIAlertController alertControllerWithTitle:@"模块未就绪"
+            message:@"请先进入「主题中心」浏览一次，再重试"
+            preferredStyle:UIAlertControllerStyleAlert];
+        [a addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
+        [TopVC() presentViewController:a animated:YES completion:nil];
+        return;
+    }
+
+    // iOS 模块只解析这些键（从二进制字符串池确认）：
+    //   binContent index module fileCode fileVersion channel transferProtocol customLength instrumentType
+    NSData *fileData = [NSData dataWithContentsOfFile:localPath];
+    NSMutableDictionary *p = [NSMutableDictionary dictionary];
+    if (gBinAsPath) {
+        p[@"binContent"] = localPath;                 // 模式B：传路径
+        os_log(gLog, "[TP] binContent 模式=路径 %{public}s", localPath.lastPathComponent.UTF8String);
+    } else {
+        p[@"binContent"] = [fileData base64EncodedStringWithOptions:0] ?: @"";  // 模式A：传 base64
+        os_log(gLog, "[TP] binContent 模式=base64 长度 %lu（原始 %lu B）",
+               (unsigned long)[(NSString *)p[@"binContent"] length], (unsigned long)fileData.length);
+    }
+    p[@"index"]            = @(gIndex);
+    p[@"module"]           = gModuleName;
+    p[@"fileCode"]         = @(gFileCode);
+    p[@"fileVersion"]      = @(gFileVersion);
+    p[@"channel"]          = @(gChannel);
+    p[@"transferProtocol"] = @(gProtocol);
+    p[@"customLength"]     = @(-1);
+    p[@"instrumentType"]   = @(gInstrument);
+
     NSData *j = [NSJSONSerialization dataWithJSONObject:p options:0 error:nil];
     NSString *payload = [[NSString alloc] initWithData:j encoding:NSUTF8StringEncoding];
     os_log(gLog, "[TP] → fileSet %{public}s", payload.UTF8String);
@@ -402,6 +452,17 @@ static NSString *FindRFSInDir(NSString *dir) {
         preferredStyle:UIAlertControllerStyleActionSheet];
     [a addAction:[UIAlertAction actionWithTitle:@"发送 fileSet（激活）" style:UIAlertActionStyleDefault
         handler:^(__unused UIAlertAction *x) { SendFileSet(); }]];
+    [a addAction:[UIAlertAction actionWithTitle:[NSString stringWithFormat:@"binContent 改为%@", gBinAsPath ? @"base64" : @"路径"]
+        style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *x) {
+            gBinAsPath = !gBinAsPath;
+            os_log(gLog, "[TP] binContent 模式切换为 %{public}s", gBinAsPath ? "路径" : "base64");
+            UIAlertController *t = [UIAlertController alertControllerWithTitle:@"已切换"
+                message:(gBinAsPath ? @"下次发送将把沙盒路径作为 binContent"
+                                    : @"下次发送将把文件 base64 作为 binContent")
+                preferredStyle:UIAlertControllerStyleAlert];
+            [t addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleCancel handler:nil]];
+            [TopVC() presentViewController:t animated:YES completion:nil];
+        }]];
     [a addAction:[UIAlertAction actionWithTitle:@"修改 fileCode / fileVersion" style:UIAlertActionStyleDefault
         handler:^(__unused UIAlertAction *x) { [self editParams]; }]];
     [a addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
@@ -461,7 +522,7 @@ static void InstallRecorders(void) {
 
 __attribute__((constructor)) static void TPInit(void) {
     gLog = os_log_create("com.rev.themepush", "general");
-    os_log(gLog, "ThemePush 1.6 已加载（改用 binContent 传文件内容）");
+    os_log(gLog, "ThemePush 1.7 已加载（instrumentType=6，binContent 双模式可切换）");
     // 立刻挂捕获钩子 —— 必须早于 RN bridge 创建模块
     CaptureInit(NSClassFromString(@"_TtC7Vehicle19RNFileManagerModule"), NO);
     CaptureInit(NSClassFromString(@"Vehicle.RNFileManagerModule"), NO);
