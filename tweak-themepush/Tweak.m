@@ -19,6 +19,7 @@
 static os_log_t gLog = NULL;
 static id gFileModule = nil;      // RNFileManagerModule 实例（保活）
 static id gBleModule  = nil;      // RNBleModule 实例（保活）
+static BOOL gOurCall = NO;        // 本次调用是否由插件发起（前置声明）
 
 // 默认参数（对应 F43 仪表主题：resourceCode=0x16B, resourceVersion=0x371）
 static NSInteger gFileCode    = 0x16B;
@@ -236,9 +237,19 @@ static void ContinueTransfer(NSString *localPath) {
     SEL sel = NSSelectorFromString(@"fileTransfer:");
     if (![gFileModule respondsToSelector:sel]) { os_log(gLog, "[TP] ❌ 无 fileTransfer:"); return; }
     id mod = gFileModule;
-    RunOnModuleQueue(mod, ^{
-        @try { ((void (*)(id, SEL, id))objc_msgSend)(mod, sel, payload); }
-        @catch (NSException *e) { os_log(gLog, "[TP] fileTransfer 异常: %{public}s", e.reason.UTF8String); }
+    // 模拟 RN 的 JS 线程：独立串行后台队列（官方调用就在这条线上）
+    static dispatch_queue_t jsQ;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        jsQ = dispatch_queue_create("com.rev.themepush.js", DISPATCH_QUEUE_SERIAL);
+    });
+    dispatch_async(jsQ, ^{
+        @autoreleasepool {
+            gOurCall = YES;
+            os_log(gLog, "[TP] 在后台 JS 队列调用 fileTransfer");
+            @try { ((void (*)(id, SEL, id))objc_msgSend)(mod, sel, payload); }
+            @catch (NSException *e) { os_log(gLog, "[TP] fileTransfer 异常: %{public}s", e.reason.UTF8String); }
+        }
     });
 }
 
@@ -250,15 +261,7 @@ static void SendFileTransfer(NSString *localPath) {
     int conn = CheckVehicleConnected(&detail);
     os_log(gLog, "[TP] 连接状态=%d (%{public}s)", conn, detail ? detail.UTF8String : "?");
     if (conn != 1) {
-        UIAlertController *a = [UIAlertController
-            alertControllerWithTitle:(conn == 0 ? @"未检测到已连接车辆" : @"无法确认连接状态")
-            message:[NSString stringWithFormat:@"%@\n\n模块在无设备时会直接崩溃（zwx device is nil）。请先在 App 中连接车辆。", detail ?: @""]
-            preferredStyle:UIAlertControllerStyleAlert];
-        [a addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-        [a addAction:[UIAlertAction actionWithTitle:@"仍然发送（可能闪退）" style:UIAlertActionStyleDestructive
-            handler:^(__unused UIAlertAction *x) { ContinueTransfer(localPath); }]];
-        [TopVC() presentViewController:a animated:YES completion:nil];
-        return;
+        os_log(gLog, "[TP] ⚠️ 连接检测=%d，仍然继续（用于验证是否真由未连接导致）", conn);
     }
 
     gFileModule = FindRNModule(@"_TtC7Vehicle19RNFileManagerModule", NO);
@@ -528,8 +531,22 @@ static NSString *FindRFSInDir(NSString *dir) {
 static IMP gOrigFT = NULL;
 static IMP gOrigBle = NULL;
 
+
 static void MyFileTransfer(id self, SEL _cmd, id params) {
-    os_log(gLog, "[TP] 📥 App 自身调用 fileTransfer: %{public}s", [[params description] UTF8String]);
+    NSString *desc = [params description] ?: @"";
+    if (gOurCall) {
+        os_log(gLog, "[TP] 📤 插件发起 fileTransfer（%lu 字符）", (unsigned long)desc.length);
+    } else {
+        // App 自身（RN JS）发起的调用 —— 这才是官方真实参数，落盘不截断
+        os_log(gLog, "[TP] ⭐ 捕获官方调用 fileTransfer（%lu 字符）", (unsigned long)desc.length);
+        os_log(gLog, "[TP] ⭐ 前 300 字符: %{public}s",
+               desc.length > 300 ? [[desc substringToIndex:300] UTF8String] : desc.UTF8String);
+        NSString *dir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+        NSString *path = [dir stringByAppendingPathComponent:@"TP_official.json"];
+        NSData *d = [desc dataUsingEncoding:NSUTF8StringEncoding];
+        if (d) { [d writeToFile:path atomically:YES];
+            os_log(gLog, "[TP] ⭐ 官方参数已存 %{public}s", path.UTF8String); }
+    }
     if (gOrigFT) ((void (*)(id, SEL, id))gOrigFT)(self, _cmd, params);
 }
 static void MyBleCmdResponse(id self, SEL _cmd, id params) {
@@ -554,7 +571,7 @@ static void InstallRecorders(void) {
 
 __attribute__((constructor)) static void TPInit(void) {
     gLog = os_log_create("com.rev.themepush", "general");
-    os_log(gLog, "ThemePush 1.7 已加载（instrumentType=6，binContent 双模式可切换）");
+    os_log(gLog, "ThemePush 1.9 已加载（instrumentType=6，binContent 双模式可切换）");
     // 立刻挂捕获钩子 —— 必须早于 RN bridge 创建模块
     CaptureInit(NSClassFromString(@"_TtC7Vehicle19RNFileManagerModule"), NO);
     CaptureInit(NSClassFromString(@"Vehicle.RNFileManagerModule"), NO);
