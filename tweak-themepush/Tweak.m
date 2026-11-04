@@ -136,6 +136,40 @@ static BOOL InspectFile(NSString *path) {
     return YES;
 }
 
+static void ContinueTransfer(NSString *localPath);
+
+#pragma mark - 车辆连接检测（避免 "zwx device is nil" 崩溃）
+
+// 返回 1=已连接  0=未连接  -1=无法判断
+static int CheckVehicleConnected(NSString **detail) {
+    Class bm = NSClassFromString(@"_TtC17NBBluetoothModule16BluetoothManager");
+    if (!bm) { if (detail) *detail = @"找不到 BluetoothManager 类"; return -1; }
+
+    id mgr = nil;
+    for (NSString *n in @[@"shared", @"sharedInstance", @"default", @"manager"]) {
+        SEL s = NSSelectorFromString(n);
+        if (![bm respondsToSelector:s]) continue;
+        @try { mgr = ((id (*)(id, SEL))objc_msgSend)(bm, s); if (mgr) break; } @catch (__unused NSException *e) {}
+    }
+    if (!mgr) { if (detail) *detail = @"取不到 BluetoothManager 单例"; return -1; }
+
+    for (NSString *key in @[@"currentDevice", @"connectedDevice", @"sharedDevice", @"device", @"bleDevice"]) {
+        id dev = nil;
+        @try { dev = [mgr valueForKey:key]; } @catch (__unused NSException *e) { continue; }
+        if (!dev || dev == [NSNull null]) continue;
+
+        BOOL conn = YES;
+        @try { conn = [[dev valueForKey:@"isConnected"] boolValue]; } @catch (__unused NSException *e) {}
+        NSString *cls = NSStringFromClass(object_getClass(dev));
+        os_log(gLog, "[TP] 设备探测 %{public}s → <%{public}s> isConnected=%d",
+               key.UTF8String, cls.UTF8String, (int)conn);
+        if (detail) *detail = [NSString stringWithFormat:@"%@<%@> isConnected=%d", key, cls, conn];
+        return conn ? 1 : 0;
+    }
+    if (detail) *detail = @"BluetoothManager 上没有设备属性";
+    return 0;
+}
+
 #pragma mark - 两步
 static void SendFileSet(void) {
     gBleModule = FindRNModule(@"_TtC7Vehicle11RNBleModule", YES);
@@ -172,8 +206,60 @@ static void SendFileSet(void) {
 
 // iOS RNFileManagerModule 只解析这 9 个键（二进制字符串池确认）：
 //   binContent index module fileCode fileVersion channel transferProtocol customLength instrumentType
+static void SendFileTransfer(NSString *localPath);
+
+static void ContinueTransfer(NSString *localPath) {
+    gFileModule = FindRNModule(@"_TtC7Vehicle19RNFileManagerModule", NO);
+    if (!gFileModule) gFileModule = FindRNModule(@"Vehicle.RNFileManagerModule", NO);
+    if (!gFileModule) { os_log(gLog, "[TP] ❌ 无 RNFileManagerModule"); return; }
+    NSData *fileData = [NSData dataWithContentsOfFile:localPath];
+    NSMutableDictionary *p = [NSMutableDictionary dictionary];
+    if (gBinAsPath) {
+        p[@"binContent"] = localPath;
+        os_log(gLog, "[TP] binContent 模式=路径");
+    } else {
+        p[@"binContent"] = [fileData base64EncodedStringWithOptions:0] ?: @"";
+        os_log(gLog, "[TP] binContent 模式=base64 长度 %lu", (unsigned long)[(NSString *)p[@"binContent"] length]);
+    }
+    p[@"index"]            = @(gIndex);
+    p[@"module"]           = gModuleName;
+    p[@"fileCode"]         = @(gFileCode);
+    p[@"fileVersion"]      = @(gFileVersion);
+    p[@"channel"]          = @(gChannel);
+    p[@"transferProtocol"] = @(gProtocol);
+    p[@"customLength"]     = @(-1);
+    p[@"instrumentType"]   = @(gInstrument);
+    NSData *j = [NSJSONSerialization dataWithJSONObject:p options:0 error:nil];
+    NSString *payload = [[NSString alloc] initWithData:j encoding:NSUTF8StringEncoding];
+    os_log(gLog, "[TP] → fileTransfer code=%ld ver=%ld idx=%ld inst=%ld",
+           (long)gFileCode, (long)gFileVersion, (long)gIndex, (long)gInstrument);
+    SEL sel = NSSelectorFromString(@"fileTransfer:");
+    if (![gFileModule respondsToSelector:sel]) { os_log(gLog, "[TP] ❌ 无 fileTransfer:"); return; }
+    id mod = gFileModule;
+    RunOnModuleQueue(mod, ^{
+        @try { ((void (*)(id, SEL, id))objc_msgSend)(mod, sel, payload); }
+        @catch (NSException *e) { os_log(gLog, "[TP] fileTransfer 异常: %{public}s", e.reason.UTF8String); }
+    });
+}
+
 static void SendFileTransfer(NSString *localPath) {
     if (!InspectFile(localPath)) return;
+
+    // 关键守卫：模块内部 "zwx device is nil" 会直接崩，必须先确认车辆已连接
+    NSString *detail = nil;
+    int conn = CheckVehicleConnected(&detail);
+    os_log(gLog, "[TP] 连接状态=%d (%{public}s)", conn, detail ? detail.UTF8String : "?");
+    if (conn != 1) {
+        UIAlertController *a = [UIAlertController
+            alertControllerWithTitle:(conn == 0 ? @"未检测到已连接车辆" : @"无法确认连接状态")
+            message:[NSString stringWithFormat:@"%@\n\n模块在无设备时会直接崩溃（zwx device is nil）。请先在 App 中连接车辆。", detail ?: @""]
+            preferredStyle:UIAlertControllerStyleAlert];
+        [a addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+        [a addAction:[UIAlertAction actionWithTitle:@"仍然发送（可能闪退）" style:UIAlertActionStyleDestructive
+            handler:^(__unused UIAlertAction *x) { ContinueTransfer(localPath); }]];
+        [TopVC() presentViewController:a animated:YES completion:nil];
+        return;
+    }
 
     gFileModule = FindRNModule(@"_TtC7Vehicle19RNFileManagerModule", NO);
     if (!gFileModule) gFileModule = FindRNModule(@"Vehicle.RNFileManagerModule", NO);
